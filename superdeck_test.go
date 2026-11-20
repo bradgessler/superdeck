@@ -691,7 +691,7 @@ func TestWorkspaceFoldersCanBeLaunchedIn(t *testing.T) {
 	os.MkdirAll(filepath.Join(a.root, "zeta-mono-tools", ".git"), 0o755)
 
 	rows, _, _ := a.folders("mono", "")
-	if len(rows) < 3 || rows[0].Rel != "mono" || rows[0].Note != "holds 2 repos" {
+	if len(rows) < 3 || rows[0].Rel != "mono" || !strings.HasSuffix(rows[0].Note, "holds 2 repos") {
 		t.Fatalf("typing the workspace name should find the workspace first: %+v", rows)
 	}
 	run, err := a.startServer("work", "mono", "", 0, 0)

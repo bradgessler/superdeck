@@ -255,13 +255,16 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 	}
 	view := func(f folder) folderView {
 		v := folderView{Rel: f.Rel, Name: filepath.Base(f.Rel), Selected: f.Rel == selected}
+		// Every row says where the folder lives, so the grey line is always
+		// there and always starts at the same place.
+		v.Parent = filepath.Base(a.root)
 		if i := strings.LastIndex(f.Rel, "/"); i >= 0 {
-			v.Parent = f.Rel[:i]
+			v.Parent += "/" + f.Rel[:i]
 		}
 		if f.Repos == 1 {
-			v.Note = "holds 1 repo"
+			v.Note = v.Parent + " · holds 1 repo"
 		} else if f.Repos > 1 {
-			v.Note = fmt.Sprintf("holds %d repos", f.Repos)
+			v.Note = fmt.Sprintf("%s · holds %d repos", v.Parent, f.Repos)
 		}
 		return v
 	}

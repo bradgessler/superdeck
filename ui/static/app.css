@@ -134,10 +134,10 @@ input:focus { border-color: var(--amber); outline: none; }
 .chips .none { color: var(--muted); margin: 0; }
 
 .picker { margin-top: 10px; border-top: 0; }
-.picker > label { padding: 13px 10px; border-radius: 10px; border-bottom: 0; gap: 10px; cursor: pointer; }
+.picker > label { padding: 10px 12px; border-radius: 10px; border-bottom: 0; gap: 10px; cursor: pointer; }
 .picker > label:hover { background: rgba(255, 255, 255, .03); }
-.picker .row-title { font-size: 16px; display: inline; }
-.picker .row-sub { display: inline; margin-left: 8px; }
+.picker .row-title { font-size: 16px; line-height: 1.3; }
+.picker .row-sub { font-size: 12px; line-height: 1.4; }
 .picker .tick { color: var(--amber); font-weight: 800; visibility: hidden; }
 .picker > label:has(input:checked) { background: rgba(255, 178, 36, .14); }
 .picker > label:has(input:checked) .row-title { color: var(--amber); }
