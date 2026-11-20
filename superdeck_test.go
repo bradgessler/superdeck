@@ -56,7 +56,7 @@ func TestWorktreesAreNotListedAsProjects(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "app-feature"), 0o755)
 	os.WriteFile(filepath.Join(root, "app-feature", ".git"), []byte("gitdir: ../app/.git/worktrees/app-feature\n"), 0o644)
 	os.MkdirAll(filepath.Join(root, "plain"), 0o755)
-	if got := listProjects(root); len(got) != 1 || got[0] != "app" {
+	if got := listProjects(root); len(got) != 1 || got[0].Rel != "app" {
 		t.Errorf("listProjects = %v, want [app]", got)
 	}
 }
@@ -678,5 +678,28 @@ func TestSignInScreens(t *testing.T) {
 	}
 	if page := do(a, "GET", "/accounts/idle", nil, "").Body.String(); !strings.Contains(page, "signed in") || !strings.Contains(page, "t@example.com") {
 		t.Errorf("account not shown as signed in: %s", page)
+	}
+}
+
+func TestWorkspaceFoldersCanBeLaunchedIn(t *testing.T) {
+	a := testApp(t)
+	// A folder that is not a repository itself but holds several.
+	os.MkdirAll(filepath.Join(a.root, "mono"), 0o755)
+	for _, n := range []string{"mono/api", "mono/web"} {
+		os.MkdirAll(filepath.Join(a.root, n, ".git"), 0o755)
+	}
+	os.MkdirAll(filepath.Join(a.root, "zeta-mono-tools", ".git"), 0o755)
+
+	rows, _, _ := a.folders("mono", "")
+	if len(rows) < 3 || rows[0].Rel != "mono" || rows[0].Note != "holds 2 repos" {
+		t.Fatalf("typing the workspace name should find the workspace first: %+v", rows)
+	}
+	run, err := a.startServer("work", "mono", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
+	if !strings.Contains(run.Tail(), "--spawn same-dir") {
+		t.Errorf("a folder that is not a repository cannot use worktrees: %s", run.Tail())
 	}
 }

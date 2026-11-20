@@ -162,7 +162,12 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 		return nil, err
 	}
 	if spawn == "" {
-		spawn = "worktree"
+		// A repository gives each session its own worktree. A folder that only
+		// holds repositories cannot have worktrees, so sessions share it.
+		spawn = "same-dir"
+		if isGitRepo(dir) {
+			spawn = "worktree"
+		}
 	}
 	if spawn != "worktree" && spawn != "same-dir" {
 		return nil, errors.New("spawn must be worktree or same-dir")

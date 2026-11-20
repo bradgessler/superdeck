@@ -57,14 +57,23 @@ func isGitRepo(dir string) bool {
 	return err == nil && st.IsDir()
 }
 
-// listProjects returns Git repositories up to three levels below root, as
-// paths relative to root. It does not follow symlinks.
-func listProjects(root string) []string {
+// A folder is somewhere an instance can be launched: a Git repository, or a
+// folder that holds repositories (a workspace you run agents across).
+type folder struct {
+	Rel   string
+	Repos int // for a workspace, how many repositories sit directly inside it
+}
+
+// listProjects returns Git repositories up to three levels below root, and the
+// folders that directly contain them, as paths relative to root. It does not
+// follow symlinks.
+func listProjects(root string) []folder {
 	rootReal, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil
 	}
-	var out []string
+	var out []folder
+	holds := map[string]int{}
 	filepath.WalkDir(rootReal, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
@@ -78,7 +87,10 @@ func listProjects(root string) []string {
 		}
 		rel, _ := filepath.Rel(rootReal, p)
 		if isGitRepo(p) {
-			out = append(out, rel)
+			out = append(out, folder{Rel: rel})
+			if parent := filepath.Dir(rel); parent != "." {
+				holds[parent]++
+			}
 			return filepath.SkipDir
 		}
 		if strings.Count(rel, string(filepath.Separator)) >= 2 {
@@ -86,9 +98,12 @@ func listProjects(root string) []string {
 		}
 		return nil
 	})
-	sort.Strings(out)
-	if len(out) > 1000 {
-		out = out[:1000]
+	for rel, n := range holds {
+		out = append(out, folder{Rel: rel, Repos: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
+	if len(out) > 2000 {
+		out = out[:2000]
 	}
 	return out
 }

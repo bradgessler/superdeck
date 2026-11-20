@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -236,12 +237,14 @@ func (a *App) instance(v RunView) instanceView {
 }
 
 type folderView struct {
-	Rel, Name, Parent string
-	Selected          bool
+	Rel, Name, Parent, Note string
+	Selected                bool
 }
 
 // folders returns the folder choices for a filter: a short list when nothing
-// is typed, more when it is. The selected folder always stays in the list.
+// is typed, more when it is. A folder whose own name matches comes before one
+// that only matches by its path, so typing a workspace's name finds the
+// workspace first. The selected folder always stays in the list.
 func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 	all := listProjects(a.root)
 	total = len(all)
@@ -250,33 +253,52 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 	if q != "" {
 		limit = 40
 	}
-	add := func(p string) {
-		parent := ""
-		if i := strings.LastIndex(p, "/"); i >= 0 {
-			parent = p[:i]
+	view := func(f folder) folderView {
+		v := folderView{Rel: f.Rel, Name: filepath.Base(f.Rel), Selected: f.Rel == selected}
+		if i := strings.LastIndex(f.Rel, "/"); i >= 0 {
+			v.Parent = f.Rel[:i]
 		}
-		rows = append(rows, folderView{p, filepath.Base(p), parent, p == selected})
+		if f.Repos == 1 {
+			v.Note = "holds 1 repo"
+		} else if f.Repos > 1 {
+			v.Note = fmt.Sprintf("holds %d repos", f.Repos)
+		}
+		return v
 	}
-	matches := 0
-	for _, p := range all {
-		if p == selected {
-			add(p)
+	rank := func(f folder) int {
+		name := strings.ToLower(filepath.Base(f.Rel))
+		switch {
+		case q == "":
+			return 0
+		case name == q:
+			return 0
+		case strings.HasPrefix(name, q):
+			return 1
+		case strings.Contains(name, q):
+			return 2
+		case strings.Contains(strings.ToLower(f.Rel), q):
+			return 3
+		}
+		return -1
+	}
+	var hits []folder
+	for _, f := range all {
+		if f.Rel == selected {
+			rows = append(rows, view(f))
+		} else if rank(f) >= 0 {
+			hits = append(hits, f)
 		}
 	}
-	for _, p := range all {
-		if p == selected || !strings.Contains(strings.ToLower(p), q) {
-			continue
+	sort.SliceStable(hits, func(i, j int) bool { return rank(hits[i]) < rank(hits[j]) })
+	shown := 0
+	for _, f := range hits {
+		if len(rows) >= limit {
+			break
 		}
-		matches++
-		if len(rows) < limit {
-			add(p)
-		}
+		rows = append(rows, view(f))
+		shown++
 	}
-	shownOthers := len(rows)
-	if len(rows) > 0 && rows[0].Selected {
-		shownOthers--
-	}
-	return rows, matches - shownOthers, total
+	return rows, len(hits) - shown, total
 }
 
 // ---- Instances ----

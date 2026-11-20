@@ -52,11 +52,11 @@
   {{range .Folders}}
   <label>
     <input type="radio" name="folder" value="{{.Rel}}" required{{if .Selected}} checked{{end}}>
-    <span class="row-body"><span class="row-title">{{.Name}}</span><span class="row-sub">{{.Parent}}</span></span>
+    <span class="row-body"><span class="row-title">{{.Name}}</span><span class="row-sub">{{if .Note}}{{.Note}}{{else}}{{.Parent}}{{end}}</span></span>
     <span class="tick" aria-hidden="true">✓</span>
   </label>
   {{else}}
-  <div class="empty">{{if .Total}}Nothing matches.{{else}}No Git repositories found in {{.Root}}.{{end}}</div>
+  <div class="empty">{{if .Total}}Nothing matches.{{else}}No folders with Git repositories found in {{.Root}}.{{end}}</div>
   {{end}}
   {{if gt .More 0}}<div class="empty">{{.More}} more. Type to find one.</div>{{end}}
 </div>
