@@ -9,7 +9,7 @@ Superdeck is a small web application served by one Go binary on your Mac. You op
 ## What it does
 
 - **Instances.** The home screen lists what is running. Open one to see its state, answer anything Claude is asking, stop it or relaunch it.
-- **New instance.** Pick an account and a Git repository under your projects folder. Sessions started from the Claude app each get their own Git worktree.
+- **New instance.** Pick an account and a folder: a Git repository, or a folder that holds several. In a repository, sessions started from the Claude app each get their own Git worktree. In a folder of repositories they share the folder.
 - **Accounts.** Each account has its own Claude config directory (`CLAUDE_CONFIG_DIR`), so several can be signed in side by side. Adding one runs Anthropic's `claude auth login`: you open Anthropic's page, sign in, and paste the code back.
 - **Questions.** When Claude asks something on first run, such as whether to trust a folder, Superdeck shows the question with buttons. A yes/no question it does not recognise is shown in Claude's own words.
 - **Staying up.** An instance that dies on its own is restarted with a growing delay. Instances you launched are remembered and brought back when Superdeck itself restarts.
@@ -30,15 +30,21 @@ go build -o superdeck .
 ```
 
 ```bash
-./superdeck -root ~/Projects
+./superdeck ~/Projects
 ```
 
 Open `http://127.0.0.1:7433`.
 
+The folders you name are the only places Superdeck may launch Claude in, along with the folders inside them. Name as many as you like, or use glob patterns. Flags go before the folders.
+
+```bash
+./superdeck ~/Projects ~/clients/acme-*
+```
+
 To reach it from a phone on your LAN or home VPN, listen on the Mac's LAN address. There is no sign-in, so anything that can reach that address can use it; only do this on a network you trust.
 
 ```bash
-./superdeck -addr 192.168.1.20:7433 -root ~/Projects
+./superdeck -addr 192.168.1.20:7433 ~/Projects
 ```
 
 ### Start at login
@@ -46,7 +52,7 @@ To reach it from a phone on your LAN or home VPN, listen on the Mac's LAN addres
 This prints a launchd agent for the settings you pass.
 
 ```bash
-./superdeck -addr 192.168.1.20:7433 -root ~/Projects -launch-agent > ~/Library/LaunchAgents/com.github.bradgessler.superdeck.plist
+./superdeck -addr 192.168.1.20:7433 -launch-agent ~/Projects > ~/Library/LaunchAgents/com.github.bradgessler.superdeck.plist
 ```
 
 ```bash
@@ -70,7 +76,7 @@ The worst someone who reaches the page should be able to do is launch Claude ins
 - **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell.
 - **No typing into Claude.** The page cannot send text to a process. It can answer yes or no, or press one of nine named keys (Enter, y, n, 1, 2, 3, Up, Down, Esc). The one exception is a sign-in, which accepts a single code made of letters, digits and `_.~#+/=-`.
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
-- **Confined folders.** A project must sit inside the `-root` folder after symlinks are resolved.
+- **Confined folders.** A folder must be one you named on the command line, or inside one, after symlinks are resolved.
 - **Escaped output.** Everything a process prints is HTML-escaped before it is shown.
 - **No cross-site driving.** Every request must carry an expected `Host` header and every state-changing request must be same-origin, so a web page elsewhere cannot drive Superdeck through your browser.
 - **Clean environment.** Child processes get an explicit environment. The launcher's own `CLAUDE_*` and `ANTHROPIC_*` variables are not passed on.

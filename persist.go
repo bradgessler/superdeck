@@ -56,6 +56,13 @@ func (a *App) remember(w wanted, keep bool) {
 // same validation as a fresh launch, so a hand-edited file gains nothing.
 func (a *App) restore() {
 	for _, w := range a.loadWanted() {
+		if !filepath.IsAbs(w.Project) && len(a.roots) > 0 {
+			// Saved by an older version, relative to its one projects folder.
+			old := w
+			w.Project = filepath.Join(a.roots[0], w.Project)
+			a.remember(old, false)
+			a.remember(w, true)
+		}
 		if _, err := a.startServer(w.Account, w.Project, w.Spawn, w.Capacity, 0); err != nil {
 			log.Printf("could not bring back %s as %s: %v", w.Project, w.Account, err)
 		}

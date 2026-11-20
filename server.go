@@ -27,9 +27,10 @@ import (
 var uiFS embed.FS
 
 type App struct {
-	root, state, claude string
-	hosts               map[string]bool
-	mgr                 *Manager
+	roots         []string // real paths of the folders Claude may be launched in
+	state, claude string
+	hosts         map[string]bool
+	mgr           *Manager
 
 	statusMu sync.Mutex
 	status   map[string]map[string]any
@@ -43,20 +44,31 @@ type App struct {
 	started time.Time
 }
 
-func newApp(root, state, claude string) *App {
-	return &App{root: root, state: state, claude: claude, mgr: NewManager(), started: time.Now(),
+func newApp(roots []string, state, claude string) *App {
+	return &App{roots: roots, state: state, claude: claude, mgr: NewManager(), started: time.Now(),
 		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
 }
 
 func main() {
 	home, _ := os.UserHomeDir()
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
-	root := flag.String("root", filepath.Join(home, "Projects"), "directory that holds your projects")
 	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for per-account Claude config")
 	claude := flag.String("claude", "", "path to the claude binary (default: found on PATH)")
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
 	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Superdeck at login with these settings, then exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: superdeck [flags] FOLDER...\n\n"+
+			"Each FOLDER is a place Superdeck may launch Claude in, along with the\n"+
+			"folders inside it. Glob patterns work too, for example ~/Projects/acme-*.\n\nflags:\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+	roots, err := expandRoots(flag.Args())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "superdeck: %v\n\n", err)
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	bin := *claude
 	if bin == "" {
@@ -69,16 +81,17 @@ func main() {
 	if p, err = filepath.Abs(p); err != nil {
 		log.Fatal(err)
 	}
-	a := newApp(*root, *state, p)
+	a := newApp(roots, *state, p)
 	if *agent {
 		self, err := os.Executable()
 		if err != nil {
 			log.Fatal(err)
 		}
-		args := []string{"-addr", *addr, "-root", a.root, "-state", a.state, "-claude", a.claude}
+		args := []string{"-addr", *addr, "-state", a.state, "-claude", a.claude}
 		if *extra != "" {
 			args = append(args, "-hosts", *extra)
 		}
+		args = append(args, a.roots...)
 		path := filepath.Dir(a.claude) + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 		fmt.Print(launchAgent(self, args, filepath.Join(a.state, "superdeck.log"), path))
 		return
@@ -105,7 +118,10 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 	}()
-	log.Printf("superdeck on http://%s  projects=%s  claude=%s", *addr, a.root, a.claude)
+	log.Printf("superdeck on http://%s  claude=%s", *addr, a.claude)
+	for _, root := range a.roots {
+		log.Printf("allowed folder: %s", root)
+	}
 	log.Print("no sign-in yet: anyone who can reach this address can use it")
 	go a.restore()
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {

@@ -172,7 +172,7 @@ func (a *App) instance(v RunView) instanceView {
 	switch {
 	case iv.IsServer:
 		iv.Title = filepath.Base(v.Project)
-		iv.Path = tilde(a.root) + "/" + v.Project
+		iv.Path = tilde(v.Project)
 	case iv.IsLogin:
 		iv.Title = "Sign in " + name
 	default:
@@ -246,7 +246,7 @@ type folderView struct {
 // that only matches by its path, so typing a workspace's name finds the
 // workspace first. The selected folder always stays in the list.
 func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
-	all := listProjects(a.root)
+	all := listProjects(a.roots)
 	total = len(all)
 	q = strings.ToLower(strings.TrimSpace(q))
 	limit := 8
@@ -254,13 +254,9 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 		limit = 40
 	}
 	view := func(f folder) folderView {
-		v := folderView{Rel: f.Rel, Name: filepath.Base(f.Rel), Selected: f.Rel == selected}
 		// Every row says where the folder lives, so the grey line is always
 		// there and always starts at the same place.
-		v.Parent = filepath.Base(a.root)
-		if i := strings.LastIndex(f.Rel, "/"); i >= 0 {
-			v.Parent += "/" + f.Rel[:i]
-		}
+		v := folderView{Rel: f.Path, Name: filepath.Base(f.Path), Parent: tilde(filepath.Dir(f.Path)), Selected: f.Path == selected}
 		if f.Repos == 1 {
 			v.Note = v.Parent + " · holds 1 repo"
 		} else if f.Repos > 1 {
@@ -269,7 +265,7 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 		return v
 	}
 	rank := func(f folder) int {
-		name := strings.ToLower(filepath.Base(f.Rel))
+		name := strings.ToLower(filepath.Base(f.Path))
 		switch {
 		case q == "":
 			return 0
@@ -279,14 +275,14 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 			return 1
 		case strings.Contains(name, q):
 			return 2
-		case strings.Contains(strings.ToLower(f.Rel), q):
+		case strings.Contains(strings.ToLower(f.Path), q):
 			return 3
 		}
 		return -1
 	}
 	var hits []folder
 	for _, f := range all {
-		if f.Rel == selected {
+		if f.Path == selected {
 			rows = append(rows, view(f))
 		} else if rank(f) >= 0 {
 			hits = append(hits, f)
@@ -360,12 +356,12 @@ func (a *App) pageNew(w http.ResponseWriter, r *http.Request) {
 	}
 	d["Accounts"] = views
 	d["Folders"], d["More"], d["Total"] = a.folders("", selected)
-	d["Root"] = tilde(a.root)
+	d["Root"] = a.rootNames()
 	render(w, "new.html", d)
 }
 
 func (a *App) partFolders(w http.ResponseWriter, r *http.Request) {
-	d := map[string]any{"Q": r.URL.Query().Get("q"), "Root": tilde(a.root)}
+	d := map[string]any{"Q": r.URL.Query().Get("q"), "Root": a.rootNames()}
 	d["Folders"], d["More"], d["Total"] = a.folders(r.URL.Query().Get("q"), r.URL.Query().Get("folder"))
 	render(w, "folder-list", d)
 }
@@ -397,12 +393,26 @@ func (a *App) doLaunch(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) pageNewFolder(w http.ResponseWriter, r *http.Request) {
 	d := page(r, "New folder", "instances")
-	d["Root"] = tilde(a.root)
+	type choice struct{ Path, Name string }
+	var roots []choice
+	for _, root := range a.roots {
+		roots = append(roots, choice{root, tilde(root)})
+	}
+	d["Roots"] = roots
 	render(w, "folder-new.html", d)
 }
 
 func (a *App) doNewFolder(w http.ResponseWriter, r *http.Request) {
-	rel, err := createProject(a.root, strings.TrimSpace(r.FormValue("name")))
+	in := r.FormValue("in")
+	allowed := false
+	for _, root := range a.roots {
+		allowed = allowed || root == in
+	}
+	if !allowed {
+		fail(w, r, "/folders/new", fmt.Errorf("pick where to create the folder"))
+		return
+	}
+	rel, err := createProject(in, strings.TrimSpace(r.FormValue("name")))
 	if err != nil {
 		fail(w, r, "/folders/new", err)
 		return
@@ -663,4 +673,13 @@ func (a *App) doUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	to(w, r, "/instances/"+run.ID)
+}
+
+// rootNames lists the allowed folders for display.
+func (a *App) rootNames() string {
+	var names []string
+	for _, root := range a.roots {
+		names = append(names, tilde(root))
+	}
+	return strings.Join(names, ", ")
 }

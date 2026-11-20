@@ -157,7 +157,7 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	if err != nil {
 		return nil, err
 	}
-	dir, err := resolveProject(a.root, project)
+	dir, err := resolveProject(a.roots, project)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	}
 	argv := []string{a.claude, "remote-control", "--name", name,
 		"--spawn", spawn, "--capacity", strconv.Itoa(capacity)}
-	run := &Run{Kind: "server", Account: accountID, Project: project, Name: name,
+	run := &Run{Kind: "server", Account: accountID, Project: dir, Name: name,
 		Version: a.claudeVersion(), Restarts: restarts, dir: dir, spawn: spawn, capacity: capacity}
 	if err := a.mgr.Start(run, argv, childEnv(cfg), a.serverExited); err != nil {
 		return nil, err

@@ -15,27 +15,53 @@ const host = "127.0.0.1:7433"
 
 // ---- folders ----
 
-func TestResolveProjectStaysInsideRoot(t *testing.T) {
-	base := t.TempDir()
+func TestResolveProjectStaysInsideAllowedFolders(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
 	root := filepath.Join(base, "root")
+	other := filepath.Join(base, "other")
 	outside := filepath.Join(base, "outside")
 	os.MkdirAll(filepath.Join(root, "org", "app"), 0o755)
+	os.MkdirAll(filepath.Join(other, "tool"), 0o755)
 	os.MkdirAll(outside, 0o755)
 	os.Symlink(outside, filepath.Join(root, "escape"))
 	os.WriteFile(filepath.Join(root, "file"), nil, 0o644)
+	roots := []string{root, other}
 
-	if _, err := resolveProject(root, "org/app"); err != nil {
-		t.Fatalf("valid project refused: %v", err)
+	for _, ok := range []string{root, filepath.Join(root, "org", "app"), filepath.Join(other, "tool"), root + "/org/../org/app"} {
+		if _, err := resolveProject(roots, ok); err != nil {
+			t.Errorf("resolveProject(%q) refused: %v", ok, err)
+		}
 	}
-	for _, bad := range []string{"", ".", "..", "../outside", "org/../../outside", "escape", outside, "file", "missing"} {
-		if p, err := resolveProject(root, bad); err == nil {
+	for _, bad := range []string{"", ".", "..", "org/app", outside, base, "/", "/etc",
+		filepath.Join(root, "..", "outside"), filepath.Join(root, "escape"), filepath.Join(root, "file"),
+		filepath.Join(root, "missing"), root + "-sibling"} {
+		if p, err := resolveProject(roots, bad); err == nil {
 			t.Errorf("resolveProject(%q) = %q, want error", bad, p)
 		}
 	}
 }
 
+func TestExpandRootsFromCommandLine(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	for _, n := range []string{"acme-api", "acme-web", "other"} {
+		os.MkdirAll(filepath.Join(base, n), 0o755)
+	}
+	os.WriteFile(filepath.Join(base, "acme-notes.txt"), nil, 0o644)
+
+	got, err := expandRoots([]string{filepath.Join(base, "acme-*"), filepath.Join(base, "other"), filepath.Join(base, "other")})
+	want := []string{filepath.Join(base, "acme-api"), filepath.Join(base, "acme-web"), filepath.Join(base, "other")}
+	if err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("expandRoots = %v, %v; want %v", got, err, want)
+	}
+	for _, bad := range [][]string{nil, {"/"}, {filepath.Join(base, "missing")}, {filepath.Join(base, "acme-notes.txt")}, {filepath.Join(base, "nothing-*")}} {
+		if got, err := expandRoots(bad); err == nil {
+			t.Errorf("expandRoots(%v) = %v, want error", bad, got)
+		}
+	}
+}
+
 func TestCreateProject(t *testing.T) {
-	root := t.TempDir()
+	root, _ := filepath.EvalSymlinks(t.TempDir())
 	if _, err := createProject(root, "new-app"); err != nil {
 		t.Fatal(err)
 	}
@@ -50,14 +76,17 @@ func TestCreateProject(t *testing.T) {
 }
 
 func TestWorktreesAreNotListedAsProjects(t *testing.T) {
-	root := t.TempDir()
+	root, _ := filepath.EvalSymlinks(t.TempDir())
 	createProject(root, "app")
 	// A worktree has a .git file pointing at the main checkout.
 	os.MkdirAll(filepath.Join(root, "app-feature"), 0o755)
 	os.WriteFile(filepath.Join(root, "app-feature", ".git"), []byte("gitdir: ../app/.git/worktrees/app-feature\n"), 0o644)
 	os.MkdirAll(filepath.Join(root, "plain"), 0o755)
-	if got := listProjects(root); len(got) != 1 || got[0].Rel != "app" {
-		t.Errorf("listProjects = %v, want [app]", got)
+	// The repository is listed, and so is the allowed folder that holds it.
+	// The worktree and the empty folder are not.
+	got := listProjects([]string{root})
+	if len(got) != 2 || got[0] != (folder{root, 1}) || got[1] != (folder{filepath.Join(root, "app"), 0}) {
+		t.Errorf("listProjects = %v", got)
 	}
 }
 
@@ -124,12 +153,13 @@ esac
 // project "app".
 func testApp(t *testing.T) *App {
 	t.Helper()
-	a := newApp(t.TempDir(), t.TempDir(), fakeClaude(t))
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	a := newApp([]string{root}, t.TempDir(), fakeClaude(t))
 	for _, n := range []string{"work", "idle"} {
 		os.MkdirAll(filepath.Join(a.state, "accounts", n), 0o700)
 	}
 	os.WriteFile(filepath.Join(a.state, "accounts", "work", "in"), nil, 0o600)
-	if _, err := createProject(a.root, "app"); err != nil {
+	if _, err := createProject(root, "app"); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.allowHosts(host, ""); err != nil {
@@ -138,6 +168,9 @@ func testApp(t *testing.T) *App {
 	t.Cleanup(func() { a.closing.Store(true); a.mgr.StopAll() })
 	return a
 }
+
+// in returns the full path of a folder inside the test app's allowed folder.
+func in(a *App, rel string) string { return filepath.Join(a.roots[0], rel) }
 
 func servers(a *App) []RunView {
 	var out []RunView
@@ -218,7 +251,7 @@ func TestScreenEscapesProcessOutput(t *testing.T) {
 func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
-	first, err := a.startServer("work", "app", "", 0, 0)
+	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +281,7 @@ func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
 func TestSignedOutInstanceIsNotRestarted(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
-	r, err := a.startServer("idle", "app", "", 0, 0)
+	r, err := a.startServer("idle", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +301,7 @@ func TestRestartGivesUpEventually(t *testing.T) {
 	a.claude = "/usr/bin/true" // every launch exits at once
 	a.ver = "1"
 	a.verAt = time.Now()
-	if _, err := a.startServer("work", "app", "", 0, 0); err != nil {
+	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return len(servers(a)) == maxRestarts+1 })
@@ -280,33 +313,46 @@ func TestRestartGivesUpEventually(t *testing.T) {
 
 func TestStartServerRejectsBadInput(t *testing.T) {
 	a := testApp(t)
-	os.MkdirAll(filepath.Join(a.root, "plain"), 0o755)
+	os.MkdirAll(in(a, "plain"), 0o755)
 	for _, c := range []struct{ account, project, spawn string }{
-		{"nope", "app", ""}, {"../work", "app", ""}, {"work", "../app", ""}, {"work", "/etc", "same-dir"},
-		{"work", "app", "session"}, {"work", "app", "worktree --dangerously-skip-permissions"}, {"work", "plain", "worktree"},
+		{"nope", in(a, "app"), ""}, {"../work", in(a, "app"), ""}, {"work", "app", ""}, {"work", in(a, "../app"), ""},
+		{"work", "/etc", "same-dir"}, {"work", in(a, "app"), "session"},
+		{"work", in(a, "app"), "worktree --dangerously-skip-permissions"}, {"work", in(a, "plain"), "worktree"},
 	} {
 		if _, err := a.startServer(c.account, c.project, c.spawn, 0, 0); err == nil {
 			t.Errorf("startServer(%q, %q, %q) succeeded", c.account, c.project, c.spawn)
 		}
 	}
-	if _, err := a.startServer("work", "app", "", 99, 0); err == nil {
+	if _, err := a.startServer("work", in(a, "app"), "", 99, 0); err == nil {
 		t.Error("capacity 99 accepted")
 	}
 }
 
 func TestInstancesComeBackAfterSuperdeckRestarts(t *testing.T) {
 	a := testApp(t)
-	a.remember(wanted{"work", "app", "worktree", 4}, true)
-	a.remember(wanted{"work", "../../etc", "same-dir", 1}, true) // a tampered entry
-	a.remember(wanted{"gone", "app", "worktree", 4}, true)
-	a.remember(wanted{"gone", "app", "", 0}, false) // stopped by a person
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	a.remember(wanted{"work", "/etc", "same-dir", 1}, true) // a tampered entry
+	a.remember(wanted{"gone", in(a, "app"), "worktree", 4}, true)
+	a.remember(wanted{"gone", in(a, "app"), "", 0}, false) // stopped by a person
 
-	next := newApp(a.root, a.state, a.claude)
+	next := newApp(a.roots, a.state, a.claude)
 	t.Cleanup(func() { next.closing.Store(true); next.mgr.StopAll() })
 	next.restore()
 	got := servers(next)
-	if len(got) != 1 || got[0].Project != "app" || got[0].Account != "work" {
+	if len(got) != 1 || got[0].Project != in(a, "app") || got[0].Account != "work" {
 		t.Fatalf("restored %+v, want only work/app", got)
+	}
+}
+
+func TestOldRelativeEntriesStillComeBack(t *testing.T) {
+	a := testApp(t)
+	a.remember(wanted{"work", "app", "worktree", 4}, true) // saved before folders were full paths
+	a.restore()
+	if got := servers(a); len(got) != 1 || got[0].Project != in(a, "app") {
+		t.Fatalf("restored %+v", got)
+	}
+	if w := a.loadWanted(); len(w) != 1 || w[0].Project != in(a, "app") {
+		t.Errorf("saved list not upgraded: %+v", w)
 	}
 }
 
@@ -441,13 +487,14 @@ func TestGuard(t *testing.T) {
 }
 
 func TestAllowHostsRefusesWildcardWithoutNames(t *testing.T) {
-	if err := newApp("", "", "").allowHosts("0.0.0.0:7433", ""); err == nil {
+	if err := newApp(nil, "", "").allowHosts("0.0.0.0:7433", ""); err == nil {
 		t.Error("wildcard bind accepted without -hosts")
 	}
 }
 
 func TestEveryPageRendersEvenWhenEmpty(t *testing.T) {
-	empty := newApp(t.TempDir(), t.TempDir(), fakeClaude(t))
+	emptyRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	empty := newApp([]string{emptyRoot}, t.TempDir(), fakeClaude(t))
 	os.MkdirAll(filepath.Join(empty.state, "accounts"), 0o700)
 	empty.allowHosts(host, "")
 	for _, a := range []*App{empty, testApp(t)} {
@@ -479,7 +526,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	os.WriteFile(filepath.Join(a.state, "accounts", "work", "asks-other"), nil, 0o600)
 
 	// Launching under a signed-out account sends you to Accounts with a reason.
-	w := do(a, "POST", "/instances", url.Values{"account": {"idle"}, "folder": {"app"}}, same)
+	w := do(a, "POST", "/instances", url.Values{"account": {"idle"}, "folder": {in(a, "app")}}, same)
 	if loc := w.Header().Get("Location"); w.Code != 303 || !strings.HasPrefix(loc, "/accounts?error=") {
 		t.Fatalf("signed-out launch: %d %q", w.Code, loc)
 	}
@@ -487,7 +534,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 		t.Fatalf("%d instances started for a signed-out account", n)
 	}
 
-	w = do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {"app"}}, same)
+	w = do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {in(a, "app")}}, same)
 	loc := w.Header().Get("Location")
 	if w.Code != 303 || !strings.HasPrefix(loc, "/instances/") {
 		t.Fatalf("launch: %d %q %s", w.Code, loc, w.Body)
@@ -530,7 +577,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	}
 
 	// A second launch of the same thing is refused, not duplicated.
-	w = do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {"app"}}, same)
+	w = do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {in(a, "app")}}, same)
 	if !strings.Contains(w.Header().Get("Location"), "error=") || len(servers(a)) != 1 {
 		t.Errorf("duplicate launch: %q, %d instances", w.Header().Get("Location"), len(servers(a)))
 	}
@@ -555,7 +602,7 @@ func TestDecliningTrustStopsCleanlyWithoutARestartLoop(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
 	os.WriteFile(filepath.Join(a.state, "accounts", "work", "asks-trust"), nil, 0o600)
-	run, err := a.startServer("work", "app", "", 0, 0)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +661,7 @@ func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
 	// unlocked, and becomes readable a moment later.
 	marker := filepath.Join(a.state, "accounts", "work", "in")
 	os.Remove(marker)
-	if _, err := a.startServer("work", "app", "", 0, 0); err != nil {
+	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(15 * time.Millisecond)
@@ -684,22 +731,34 @@ func TestSignInScreens(t *testing.T) {
 func TestWorkspaceFoldersCanBeLaunchedIn(t *testing.T) {
 	a := testApp(t)
 	// A folder that is not a repository itself but holds several.
-	os.MkdirAll(filepath.Join(a.root, "mono"), 0o755)
-	for _, n := range []string{"mono/api", "mono/web"} {
-		os.MkdirAll(filepath.Join(a.root, n, ".git"), 0o755)
+	for _, n := range []string{"mono/api", "mono/web", "zeta-mono-tools"} {
+		os.MkdirAll(in(a, n+"/.git"), 0o755)
 	}
-	os.MkdirAll(filepath.Join(a.root, "zeta-mono-tools", ".git"), 0o755)
 
 	rows, _, _ := a.folders("mono", "")
-	if len(rows) < 3 || rows[0].Rel != "mono" || !strings.HasSuffix(rows[0].Note, "holds 2 repos") {
+	if len(rows) < 3 || rows[0].Rel != in(a, "mono") || !strings.HasSuffix(rows[0].Note, "holds 2 repos") {
 		t.Fatalf("typing the workspace name should find the workspace first: %+v", rows)
 	}
-	run, err := a.startServer("work", "mono", "", 0, 0)
+	run, err := a.startServer("work", in(a, "mono"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
 	if !strings.Contains(run.Tail(), "--spawn same-dir") {
 		t.Errorf("a folder that is not a repository cannot use worktrees: %s", run.Tail())
+	}
+}
+
+func TestNewFolderOnlyInsideAllowedFolders(t *testing.T) {
+	a := testApp(t)
+	w := do(a, "POST", "/folders", url.Values{"name": {"fresh"}, "in": {a.roots[0]}}, same)
+	if got := w.Header().Get("Location"); got != "/new?folder="+url.QueryEscape(in(a, "fresh")) {
+		t.Fatalf("create: %q", got)
+	}
+	for _, bad := range []string{"", "/tmp", in(a, "app"), a.roots[0] + "/.."} {
+		w := do(a, "POST", "/folders", url.Values{"name": {"sneaky"}, "in": {bad}}, same)
+		if !strings.Contains(w.Header().Get("Location"), "error=") {
+			t.Errorf("folder created in %q", bad)
+		}
 	}
 }

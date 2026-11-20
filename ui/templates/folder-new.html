@@ -1,11 +1,22 @@
 {{template "head" .}}
 <a class="backlink" href="/new">‹ New instance</a>
 <h1>New folder</h1>
-<p class="lede">Creates an empty Git repository in {{.Root}}.</p>
+<p class="lede">Creates an empty Git repository.</p>
 <form method="post" action="/folders" class="stack">
   <label for="name">Folder name</label>
   <input id="name" name="name" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required autofocus autocapitalize="none" autocorrect="off" spellcheck="false">
   <p class="small">Letters, digits, dots, dashes and underscores.</p>
+  {{if gt (len .Roots) 1}}
+  <label>Inside</label>
+  <div class="chips">
+    {{range $i, $r := .Roots}}
+    <label class="chip"><input type="radio" name="in" value="{{$r.Path}}" required{{if eq $i 0}} checked{{end}}>{{$r.Name}}</label>
+    {{end}}
+  </div>
+  {{else}}{{range .Roots}}
+  <input type="hidden" name="in" value="{{.Path}}">
+  <p class="small">It will be created inside {{.Name}}.</p>
+  {{end}}{{end}}
   <button class="btn primary big">Create folder</button>
 </form>
 {{template "foot" .}}
