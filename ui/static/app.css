@@ -162,15 +162,11 @@ input:focus { border-color: var(--amber); outline: none; }
 .steps li::marker { color: var(--muted); font-weight: 700; }
 .stack.code { margin-top: 14px; }
 
-.stopform { margin-top: 26px; }
-
-.output { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 14px; }
-.output summary { cursor: pointer; color: var(--muted); font-weight: 600; padding: 4px 0; }
 .screen {
   margin: 12px 0 0; padding: 12px; border-radius: var(--r);
   background: #0b0908; color: #d9d0c5;
   font: 12px/1.35 var(--mono);
-  white-space: pre; overflow-x: auto; min-height: 5em;
+  white-space: pre-wrap; overflow-wrap: anywhere; min-height: 5em;
 }
 .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 12px; max-width: 460px; }
 .keys button { padding: 11px 0; border-radius: 10px; background: var(--raised); font: 600 15px var(--mono); }
@@ -222,5 +218,8 @@ input:focus { border-color: var(--amber); outline: none; }
 .signin .cancel { margin-top: 22px; }
 .signin .cancel button { width: 100%; padding: 12px; color: var(--muted); font-weight: 600; border-radius: var(--r); }
 .signin .cancel button:hover { color: var(--text); }
-.signin .said { margin-top: 30px; }
-.signin .said summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.signin form + .btn { margin-top: 10px; }
+.btn.stop { color: #ff9d94; }
+.screen { margin-top: 18px; }
+.open-claude { max-width: 460px; }
+#live .lede { margin-bottom: 16px; }

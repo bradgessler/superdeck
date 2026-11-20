@@ -26,10 +26,7 @@
   <h1>That didn't work</h1>
   <p class="lede">Claude didn't accept the sign-in. A code works once and expires quickly, so start again to get a fresh one.</p>
   <form method="post" action="/accounts/{{.I.AccountID}}/signin"><button class="btn big primary">Try again</button></form>
-  <details class="said">
-    <summary>What Claude said</summary>
-    <pre class="screen">{{.Screen}}</pre>
-  </details>
+  <a class="btn big" href="/instances/{{.I.ID}}/output">See what Claude said</a>
 
 {{else if eq .I.State "cancelled"}}
   <h1>Sign-in cancelled</h1>

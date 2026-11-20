@@ -107,7 +107,9 @@ case "$1 $2" in
       if [ "$x" != "y" ]; then echo "Workspace not trusted"; exit 1; fi
     fi
     if [ -f "$C/asks-other" ]; then printf "Share anonymous usage data? (y/n) "; read x; echo "answered=$x"; fi
-    echo "serving $*"; sleep 600 ;;
+    echo "serving $*"
+    echo "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_0123456789abcdefABCDEFxyz"
+    echo "Or ask Claude to work in this folder"; sleep 600 ;;
   "update "*) echo "Claude Code is up to date" ;;
   *) echo "unexpected: $*"; exit 2 ;;
 esac
@@ -497,6 +499,12 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 		t.Errorf("trust question missing from page")
 	}
 
+	if w := do(a, "GET", loc+"/output", nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "Trust ") {
+		t.Errorf("terminal screen: %d", w.Code)
+	}
+	if strings.Contains(page, "<details") || strings.Contains(page, "<pre") {
+		t.Error("the instance screen should not embed the terminal")
+	}
 	if w := do(a, "POST", loc+"/key", url.Values{"key": {"rm -rf"}}, same); !strings.Contains(w.Header().Get("Location"), "error=") {
 		t.Errorf("bad key not refused: %d %q", w.Code, w.Header().Get("Location"))
 	}
@@ -512,6 +520,11 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 		t.Errorf("the no answer did not reach Claude: %q", run.Tail())
 	}
 	page = do(a, "GET", loc+"/live", nil, "").Body.String()
+	waitFor(t, func() bool { return run.View().Link != "" })
+	page = do(a, "GET", loc+"/live", nil, "").Body.String()
+	if !strings.Contains(page, `href="https://claude.ai/code?environment=env_0123456789abcdefABCDEFxyz"`) {
+		t.Errorf("Open in Claude link missing or broken: %s", page)
+	}
 	if strings.Contains(page, "Trust this folder?") || !strings.Contains(page, "running") {
 		t.Errorf("page did not move on after trust: %s", page)
 	}

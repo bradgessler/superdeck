@@ -2,28 +2,14 @@
 <a class="backlink" href="/">‹ Instances</a>
 {{template "instance-live" .}}
 
-{{if .I.Live}}
-<form method="post" action="/instances/{{.I.ID}}/stop" hx-post="/instances/{{.I.ID}}/stop"{{if .I.IsServer}} hx-confirm="Stop this instance? Any Claude sessions it is hosting will end."{{end}} class="stopform">
-  <button class="btn danger">{{if .I.IsServer}}Stop instance{{else}}Cancel{{end}}</button>
-</form>
-{{end}}
-
-<details class="output"{{if .I.Failed}} open{{end}}>
-  <summary>Output</summary>
-  <pre class="screen"{{if .I.Live}} hx-get="/instances/{{.I.ID}}/screen" hx-trigger="every 1s"{{end}}>{{.Screen}}</pre>
+<div class="actions">
   {{if .I.Live}}
-  <form method="post" action="/instances/{{.I.ID}}/key" hx-post="/instances/{{.I.ID}}/key" hx-swap="none" class="keys" aria-label="Press a key">
-    <button name="key" value="enter" class="wide">Enter</button>
-    <button name="key" value="y">y</button>
-    <button name="key" value="n">n</button>
-    <button name="key" value="1">1</button>
-    <button name="key" value="2">2</button>
-    <button name="key" value="3">3</button>
-    <button name="key" value="up" aria-label="Up">↑</button>
-    <button name="key" value="down" aria-label="Down">↓</button>
-    <button name="key" value="esc">Esc</button>
+  <form method="post" action="/instances/{{.I.ID}}/stop" hx-post="/instances/{{.I.ID}}/stop"{{if .I.IsServer}} hx-confirm="Stop this instance? Any Claude sessions it is hosting will end."{{end}}>
+    <button class="btn big stop">{{if .I.IsServer}}Stop instance{{else}}Cancel{{end}}</button>
   </form>
-  <p class="small">If Claude is waiting on something this page did not recognise, these keys answer it.</p>
+  {{else if .I.IsServer}}
+  <form method="post" action="/instances/{{.I.ID}}/relaunch"><button class="btn big primary">Launch again</button></form>
   {{end}}
-</details>
+  <a class="btn big" href="/instances/{{.I.ID}}/output">Terminal</a>
+</div>
 {{template "foot" .}}

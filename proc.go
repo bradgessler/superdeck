@@ -24,12 +24,15 @@ import (
 const (
 	maxTail    = 8 << 10
 	maxRunning = 16
+	termCols   = 200
+	termRows   = 50
 )
 
 var (
 	ansiRe    = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]`)
 	urlRe     = regexp.MustCompile(`https://[^\s"'<>]+`)
 	trustRe   = regexp.MustCompile(`(?im)workspace not trusted|do you trust|trust this folder|trust the files|one you trust|^trust .+\? \[y/n\]`)
+	linkRe    = regexp.MustCompile(`https://claude\.ai/code\?environment=[A-Za-z0-9_]+`)
 	askRe     = regexp.MustCompile(`(?i)(\[y/n\]|\(y/n\))\s*:?\s*$`)
 	loginRe   = regexp.MustCompile(`(?i)must be logged in|claude auth login|please run /login`)
 	consentRe = regexp.MustCompile(`(?i)enable remote control\?`)
@@ -80,6 +83,7 @@ type Run struct {
 	onExit func(*Run)
 
 	mu       sync.Mutex
+	link     string // where Claude says this instance can be opened
 	vtBroken bool   // the emulator choked on this output; show plain text instead
 	tail     string // recent output as plain text
 	stopped  bool   // someone asked for this process to stop
@@ -96,12 +100,16 @@ type RunView struct {
 	Hint     string // "needs-trust", "needs-consent", "needs-answer", "needs-login" or ""
 	Question string // Claude's own words, for a yes/no question this program does not know
 	URL      string // sign-in page, for a login that is waiting
+	Link     string // claude.ai address of a connected instance
 }
 
 func (r *Run) View() RunView {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped}
+	if !r.done {
+		v.Link = r.link
+	}
 	recent := r.tail
 	if len(recent) > 2048 {
 		recent = recent[len(recent)-2048:]
@@ -155,6 +163,11 @@ func (r *Run) append(b []byte) {
 	r.tail += ansiRe.ReplaceAllString(text, "")
 	if len(r.tail) > maxTail {
 		r.tail = r.tail[len(r.tail)-maxTail:]
+	}
+	if r.Kind == "server" {
+		if m := linkRe.FindAllString(r.tail, -1); len(m) > 0 {
+			r.link = m[len(m)-1]
+		}
 	}
 }
 
@@ -416,11 +429,13 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 	r.ID = hex.EncodeToString(idb)
 	r.Started = time.Now()
 	r.onExit = onExit
-	r.vt = vt10x.New(vt10x.WithSize(100, 30), vt10x.WithWriter(io.Discard))
+	// Wide, so Claude never breaks a link or a path across lines. The page
+	// wraps the text to fit whatever screen it is shown on.
+	r.vt = vt10x.New(vt10x.WithSize(termCols, termRows), vt10x.WithWriter(io.Discard))
 	r.cmd = exec.Command(argv[0], argv[1:]...)
 	r.cmd.Dir = r.dir
 	r.cmd.Env = env
-	tty, err := pty.StartWithSize(r.cmd, &pty.Winsize{Cols: 100, Rows: 30})
+	tty, err := pty.StartWithSize(r.cmd, &pty.Winsize{Cols: termCols, Rows: termRows})
 	if err != nil {
 		return err
 	}

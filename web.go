@@ -35,6 +35,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /accounts/{id}/signin", a.doSignIn)
 
 	mux.HandleFunc("GET /instances/{id}", a.pageInstance)
+	mux.HandleFunc("GET /instances/{id}/output", a.pageOutput)
 	mux.HandleFunc("GET /instances/{id}/live", a.partLive)
 	mux.HandleFunc("GET /instances/{id}/screen", a.partScreen)
 	mux.HandleFunc("GET /instances/{id}/watch", a.watch)
@@ -157,7 +158,7 @@ type instanceView struct {
 	Live, Dim, IsServer, IsLogin                         bool
 	Ask                                                  string // "trust", "consent" or ""
 	Notice                                               string
-	URL                                                  string
+	URL, Link                                            string
 	Outdated                                             bool
 	Installed, Version                                   string
 	Failed                                               bool
@@ -166,7 +167,7 @@ type instanceView struct {
 func (a *App) instance(v RunView) instanceView {
 	name := a.accountName(v.Account)
 	iv := instanceView{ID: v.ID, Kind: v.Kind, Account: name, AccountID: v.Account, Live: !v.Done, Dim: v.Done,
-		IsServer: v.Kind == "server", IsLogin: v.Kind == "login", URL: v.URL, Version: v.Version}
+		IsServer: v.Kind == "server", IsLogin: v.Kind == "login", URL: v.URL, Link: v.Link, Version: v.Version}
 	switch {
 	case iv.IsServer:
 		iv.Title = filepath.Base(v.Project)
@@ -467,16 +468,26 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) *Run {
 	return run
 }
 
-func (a *App) pageInstance(w http.ResponseWriter, r *http.Request) {
+// pageOutput is the terminal for one process: what Claude has printed, and
+// the handful of keys that can be pressed in it.
+func (a *App) pageOutput(w http.ResponseWriter, r *http.Request) {
 	run := a.run(w, r)
 	if run == nil {
 		return
 	}
-	// Size the process's terminal for whoever is looking at it.
-	if strings.Contains(r.UserAgent(), "Mobile") {
-		run.Resize(46, 24)
-	} else {
-		run.Resize(110, 32)
+	iv := a.instance(run.View())
+	d := page(r, iv.Title+" output", "instances")
+	if iv.IsLogin {
+		d["Nav"] = "accounts"
+	}
+	d["I"], d["Screen"] = iv, run.Screen()
+	render(w, "output.html", d)
+}
+
+func (a *App) pageInstance(w http.ResponseWriter, r *http.Request) {
+	run := a.run(w, r)
+	if run == nil {
+		return
 	}
 	iv := a.instance(run.View())
 	d := page(r, iv.Title, "instances")
@@ -554,6 +565,7 @@ func (a *App) doKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	back := "/instances/" + run.ID
+	back += "/output"
 	if err := pressKey(run, r.FormValue("key")); err != nil {
 		fail(w, r, back, err)
 		return

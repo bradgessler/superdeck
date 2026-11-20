@@ -103,7 +103,12 @@
   {{end}}
 
   {{if and .I.IsServer .I.Live (not .I.Ask)}}
-  <p class="lede">Open the Claude app, go to Code, and start a session on this instance.</p>
+    {{if .I.Link}}
+    <p class="lede">Connected. Start a session here from the Claude app, under Code.</p>
+    <a class="btn big primary open-claude" href="{{.I.Link}}" target="_blank" rel="noopener noreferrer">Open in Claude</a>
+    {{else}}
+    <p class="lede">Connecting to Claude…</p>
+    {{end}}
   {{end}}
 
   {{if .I.Outdated}}
