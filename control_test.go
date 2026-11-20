@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -216,5 +217,84 @@ func TestAnAccountCanBeAddedAndSignedInByCommands(t *testing.T) {
 	}
 	if out, _ := ask(t, a, me, "", "accounts"); !strings.Contains(out, "extra  (signed in") {
 		t.Errorf("accounts: %q", out)
+	}
+}
+
+// Claude starts each session in a Git worktree, which a repository with no
+// commit cannot give it: on a real Mac every message sent to such an instance
+// went unanswered, with the reason only in the terminal.
+func TestARepositoryWithNoCommitsIsSaidToNeedOne(t *testing.T) {
+	a := testApp(t)
+	a.serveControl()
+
+	// A folder Superdeck makes starts with a commit.
+	made, err := createProject(a.roots[0], "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noCommits(made) {
+		t.Error("a new project folder has no commit")
+	}
+	if noCommits(a.roots[0]) {
+		t.Error("a folder that is not a repository was said to have no commits")
+	}
+
+	// One made elsewhere may not.
+	bare := filepath.Join(a.roots[0], "bare")
+	os.Mkdir(bare, 0o755)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = bare
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if !noCommits(bare) {
+		t.Fatal("a repository with no commits was not noticed")
+	}
+	run, err := a.startServer("work", bare, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return a.instance(run.View()).Do == "open" })
+	if iv := a.instance(run.View()); iv.State != "needs a commit" || !strings.Contains(iv.Lede, "no commits") {
+		t.Errorf("page: %q %q", iv.State, iv.Lede)
+	}
+	if out, _ := ask(t, a, run, "", "status"); !strings.Contains(out, "no commits") {
+		t.Errorf("status: %q", out)
+	}
+	before := a.instance(run.View()).Sig
+
+	git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-q", "-m", "one")
+	iv := a.instance(run.View())
+	if iv.State != "running" || iv.Sig == before {
+		t.Errorf("after a commit: %q, and the page would not have redrawn: %v", iv.State, iv.Sig == before)
+	}
+	git("pack-refs", "--all")
+	if noCommits(bare) {
+		t.Error("a packed branch was read as no commits")
+	}
+}
+
+// Two Superdecks opening the same new or old database at once both tried to
+// apply the first migration, and one refused to start.
+func TestOpeningTheDatabaseTwiceAtOnceUpgradesItOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "superdeck.db")
+	errs := make(chan error, 8)
+	for i := 0; i < cap(errs); i++ {
+		go func() {
+			s, err := openStore(path)
+			if err == nil {
+				s.db.Close()
+			}
+			errs <- err
+		}()
+	}
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
 	}
 }

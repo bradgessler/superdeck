@@ -233,6 +233,9 @@ func (a *App) ctlStatus(c ctl) (int, string) {
 			case "question":
 				fmt.Fprintf(&b, "    Claude is asking: %s\n    Answer with: superdeck answer %s yes   (or no)\n", strings.TrimSpace(iv.Question), v.ID)
 			case "open":
+				if noCommits(v.Project) {
+					fmt.Fprintf(&b, "    Sessions cannot start here yet: this repository has no commits. Make a first commit in it.\n")
+				}
 				fmt.Fprintf(&b, "    Open it in the Claude app: %s\n", iv.Link)
 			}
 		case v.Kind == "login" && !v.Done:

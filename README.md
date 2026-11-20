@@ -112,7 +112,7 @@ Be clear about what that means. **Anyone who can reach the page can take control
 
 What the restrictions below do buy is that reaching the page gives no shortcut around Claude: there is no way to run an arbitrary command, read a file, or type free text into a process through Superdeck.
 
-- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell. For its own housekeeping it also runs itself (`superdeck hold`, the process that keeps one Claude alive) and `ps` and `pgrep` to check on those.
+- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version`, `git init` and `git commit` (one empty first commit in a folder it has just made), with arguments it builds itself and passes as a list, never through a shell. For its own housekeeping it also runs itself (`superdeck hold`, the process that keeps one Claude alive) and `ps` and `pgrep` to check on those.
 - **No typing into Claude.** The page cannot send text to a process. It can answer yes or no, or press one of nine named keys (Enter, y, n, 1, 2, 3, Up, Down, Esc). The one exception is a sign-in, which accepts a single code made of letters, digits and `_.~#+/=-`.
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
 - **Listed folders only.** An instance can be launched only in a folder Superdeck lists: a Git repository, or a folder holding repositories, at or inside a folder you named on the command line, after symlinks are resolved. Hidden folders and the insides of repositories are not offered.
@@ -188,6 +188,7 @@ Claude may ask your permission in the app before running a command, like any oth
 |---|---|
 | Superdeck crashes, is killed or is upgraded | launchd restarts it. Holders and Claude are not touched; Superdeck finds them again and carries on. |
 | Superdeck is running but has stopped answering | It checks itself every 30 seconds by asking for a page the way a browser would. After four failures in a row it writes what it was doing to the log and exits, and launchd starts a fresh one. Instances are not touched. |
+| A folder is a Git repository with no commits | Claude cannot start a session there, and says so only in its terminal. The instance's page and `superdeck status` say it needs a first commit. Folders Superdeck makes start with one. |
 | The Mac's address on the network changes | The page keeps working at the new address. When listening on every interface, Superdeck answers to any numeric address and to the Mac's own name, on its port. |
 | A Claude instance dies on its own | Restarted after 5 seconds, doubling up to every 5 minutes, for as long as it takes. An instance you launched is only ever forgotten by you. The home screen shows it as restarting, and you can tell it not to. |
 | A holder dies | Claude dies with it. Superdeck notices after a few seconds, makes sure nothing was left behind, and restarts the instance. It records each Claude process id, so this holds even if Superdeck itself was restarted in between. |

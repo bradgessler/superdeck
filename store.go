@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -38,7 +39,13 @@ func openStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // one writer; SQLite is plenty fast for this
-	if err := migrate(db, path, existed); err != nil {
+	// One upgrade at a time. Two openers that both found an old schema would
+	// each try to apply the same migration, and the loser would refuse to
+	// start. The second waits here and then finds nothing left to do.
+	unlock := lockFile(path + ".upgrade")
+	err = migrate(db, path, existed)
+	unlock()
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -261,4 +268,19 @@ func (s *Store) Proven(accountID, folder string) bool {
 func (s *Store) Alive() error {
 	var n int
 	return s.db.QueryRow(`SELECT 1`).Scan(&n)
+}
+
+// lockFile takes an exclusive lock on a file beside the database, waiting for
+// whoever holds it, and returns what releases it. If the lock cannot be taken
+// the caller carries on without it: that is no worse than having no lock.
+func lockFile(path string) func() {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }
 }

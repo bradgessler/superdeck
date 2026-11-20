@@ -186,5 +186,61 @@ func createProject(root, name string) (string, error) {
 		}
 		return "", errors.New("git init failed: " + why)
 	}
+	// Claude starts each session in a Git worktree, and a repository with no
+	// commit has nothing to base one on: every session would fail to start.
+	// So the folder begins with an empty commit, made as the owner if Git
+	// knows who that is and as Superdeck if not.
+	if err := firstCommit(dir); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
 	return dir, nil
+}
+
+func firstCommit(dir string) error {
+	var why string
+	for _, who := range [][]string{nil, {"-c", "user.name=Superdeck", "-c", "user.email=superdeck@localhost"}} {
+		args := append(append([]string{}, who...), "commit", "--allow-empty", "--no-verify", "-q", "-m", "Start")
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = childEnv("")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		if why, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n"); why == "" {
+			why = err.Error()
+		}
+	}
+	return errors.New("git commit failed: " + why)
+}
+
+// noCommits reports whether dir is a Git repository whose current branch has
+// no commit yet. It reads Git's files rather than running Git, and says no
+// whenever it is not sure: it only decides what a page says.
+func noCommits(dir string) bool {
+	git := filepath.Join(dir, ".git")
+	head, err := os.ReadFile(filepath.Join(git, "HEAD"))
+	if err != nil {
+		return false // not a repository, or a worktree whose .git is a file
+	}
+	ref, ok := strings.CutPrefix(strings.TrimSpace(string(head)), "ref: ")
+	if !ok || !strings.HasPrefix(ref, "refs/") || strings.Contains(ref, "..") {
+		return false // a detached HEAD names a commit
+	}
+	if _, err := os.Stat(filepath.Join(git, ref)); err == nil {
+		return false
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	packed, err := os.ReadFile(filepath.Join(git, "packed-refs"))
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	for _, line := range strings.Split(string(packed), "\n") {
+		if strings.HasSuffix(line, " "+ref) {
+			return false
+		}
+	}
+	return true
 }

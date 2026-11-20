@@ -10,7 +10,7 @@ description: Go conventions, process supervision rules and testing practice for 
 Superdeck's safety is that it can only run a short list of commands. Keep it that way.
 
 - Every `exec.Command` takes an argument list built in Go from validated values. Never a shell, never a string from a request.
-- The only commands are `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version` and `git init`. Adding one is a security decision: say so and update the README.
+- The only commands are `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version`, `git init` and `git commit` (one empty first commit in a folder it has just made). Adding one is a security decision: say so and update the README.
 - Validate before use: account names and folder names against the patterns in `paths.go`; folders through `resolveProject`, which resolves symlinks and checks the result is inside an allowed folder, and `offered`, which checks it is one Superdeck lists.
 - The browser cannot type into a process. It can answer yes or no, press one of the named keys in `instances.go`, or submit a sign-in code matching `codeRe`. Do not widen this without being asked.
 - Child processes get the explicit environment from `childEnv`. Never inherit `os.Environ()`.

@@ -305,6 +305,10 @@ func (a *App) instance(v RunView) instanceView {
 	case !v.Done && iv.IsServer && v.Link != "":
 		iv.State, iv.Cls, iv.Do = "running", "on", "open"
 		iv.Lede = "Connected. Start a session here from the Claude app, under Code."
+		if noCommits(v.Project) {
+			iv.State, iv.Cls = "needs a commit", "wait"
+			iv.Lede = "Connected, but sessions cannot start here yet. This repository has no commits, and Claude needs one to work from. Make a first commit in this folder; nothing needs restarting."
+		}
 	case !v.Done && iv.IsServer:
 		iv.State, iv.Cls = "starting", "on"
 		iv.Lede = "Connecting to Claude…"
