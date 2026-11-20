@@ -89,7 +89,7 @@ func (a *App) restore() {
 			a.remember(w, true)
 		}
 		if a.running(w.Account, w.Project) {
-			continue // tmux kept it going while Superdeck was away
+			continue // its holder kept it going while Superdeck was away
 		}
 		if _, err := a.startServer(w.Account, w.Project, w.Spawn, w.Capacity, 0); err != nil {
 			log.Printf("could not bring back %s as %s: %v", w.Project, w.Account, err)

@@ -5,7 +5,10 @@ go 1.23.0
 toolchain go1.23.1
 
 require (
+	github.com/creack/pty v1.1.24
+	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
 	github.com/pressly/goose/v3 v3.24.3
+	golang.org/x/term v0.27.0
 	modernc.org/sqlite v1.37.1
 )
 

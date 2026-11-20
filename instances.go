@@ -399,8 +399,8 @@ func (a *App) expire(run *Run) {
 }
 
 // adopt picks up the processes that were running when Superdeck last exited.
-// The ones tmux is still holding carry on untouched; the ones that are gone
-// are recorded as ended.
+// The ones still being held carry on untouched; the ones that are gone are
+// recorded as ended.
 func (a *App) adopt() {
 	runs, err := a.data().LiveRuns()
 	if err != nil {

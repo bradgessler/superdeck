@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -165,9 +166,6 @@ func testApp(t *testing.T) *App {
 	if err := a.allowHosts(host, ""); err != nil {
 		t.Fatal(err)
 	}
-	if a.mgr.bin == "" {
-		t.Skip("tmux is not installed")
-	}
 	t.Cleanup(func() { a.closing.Store(true); a.mgr.StopAll() })
 	return a
 }
@@ -176,15 +174,19 @@ func init() {
 	pollEvery, answerWait = 25*time.Millisecond, 150*time.Millisecond
 }
 
-// testManager is a Manager with its own private tmux server, torn down after
-// the test.
+// The test binary doubles as the holder: Superdeck starts holders by
+// re-running itself with "hold", and under `go test` "itself" is this binary.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "hold" {
+		os.Exit(holdMain(os.Args[2:]))
+	}
+	os.Exit(m.Run())
+}
+
+// testManager is a Manager whose processes are stopped after the test.
 func testManager(t *testing.T) *Manager {
 	t.Helper()
-	bin := findTmux("")
-	if bin == "" {
-		t.Skip("tmux is not installed")
-	}
-	m := NewManager(bin, filepath.Join(t.TempDir(), "tmux.sock"))
+	m := NewManager(os.Args[0], t.TempDir())
 	t.Cleanup(m.StopAll)
 	return m
 }
@@ -286,7 +288,7 @@ func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
 		t.Errorf("unexpected command line: %s", first.Tail())
 	}
 
-	syscall.Kill(-first.pid(), syscall.SIGKILL) // dies on its own
+	syscall.Kill(-first.Pid(), syscall.SIGKILL) // dies on its own
 	waitFor(t, func() bool { return len(servers(a)) == 2 })
 	second := a.mgr.Get(servers(a)[0].ID)
 	if second.Restarts != 1 || !second.alive() {
@@ -657,18 +659,18 @@ func TestAbandonedSignInExpires(t *testing.T) {
 	}
 }
 
-func TestColourCodesBecomeEscapedHTML(t *testing.T) {
-	got := string(ansiToHTML("\x1b[1;31m<b>&\x1b[0m plain \x1b[38;5;46mgreen\x1b[39m \x1b[38;2;1;2;3mrgb\x1b[0m\x1b[2J\x1b]0;title\x07 end"))
-	want := `<span style="color:#ff6b5e;font-weight:700;">&lt;b&gt;&amp;</span> plain <span style="color:#00ff00;">green</span> <span style="color:#010203;">rgb</span> end`
-	if got != want {
-		t.Errorf("ansiToHTML:\n got %s\nwant %s", got, want)
+func TestGarbageOutputCannotCrashSuperdeck(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	junk := "head -c 300000 /dev/urandom; printf '\\033[999999;999999H\\033[9999999A\\033[?1049h\\033[2J\\033]0;'; head -c 5000 /dev/urandom; echo; echo '<script>alert(1)</script>'"
+	if err := m.Start(r, []string{"/bin/sh", "-c", junk}, nil, nil); err != nil {
+		t.Fatal(err)
 	}
-	// Nonsense must not panic or produce markup of its own.
-	for _, junk := range []string{"\x1b[", "\x1b[38;5m", "\x1b[38;2;999m", "\x1b[;;;m<script>", strings.Repeat("\x1b[31m", 5000)} {
-		if out := string(ansiToHTML(junk)); strings.Contains(out, "<script>") {
-			t.Errorf("unescaped output for %q", junk)
-		}
+	waitFor(t, func() bool { return r.View().Done })
+	if s := string(r.Screen()); strings.Contains(s, "<script>") {
+		t.Error("process output reached the page unescaped")
 	}
+	_ = r.Tail()
 }
 
 func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
@@ -888,7 +890,7 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 	}
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
-	pid := run.pid()
+	pid := run.Pid()
 
 	// Superdeck goes away without stopping anything, and a new one starts.
 	a.closing.Store(true)
@@ -901,8 +903,8 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 		t.Fatalf("after restart: %+v", got)
 	}
 	same := next.mgr.Get(run.ID)
-	if same.pid() != pid {
-		t.Errorf("the Claude process was replaced: pid %d, was %d", same.pid(), pid)
+	if same.Pid() != pid || pid == 0 {
+		t.Errorf("the Claude process was replaced: pid %d, was %d", same.Pid(), pid)
 	}
 	waitFor(t, func() bool { return strings.Contains(same.Tail(), "serving") && same.View().Link != "" })
 
@@ -914,7 +916,7 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 	}
 }
 
-func TestInstancesAreRelaunchedIfTmuxItselfDies(t *testing.T) {
+func TestInstanceIsRelaunchedIfItsHolderDies(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
 	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
@@ -922,6 +924,46 @@ func TestInstancesAreRelaunchedIfTmuxItselfDies(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return strings.Contains(first.Tail(), "serving") })
-	a.mgr.tmux("kill-server") // as after a reboot, or if tmux crashed
+	// The holder is killed outright, as if it crashed. It leaves no record.
+	exec.Command("pkill", "-9", "-f", first.sock()).Run()
+	orphan := first.Pid()
 	waitFor(t, func() bool { return len(servers(a)) == 2 && !servers(a)[0].Done })
+	// The process it was holding must not be left running beside its replacement.
+	waitFor(t, func() bool { return syscall.Kill(orphan, 0) != nil })
+	if first.View().ExitCode != -1 {
+		t.Errorf("a vanished process should be recorded as -1, got %d", first.View().ExitCode)
+	}
+}
+
+func TestProcessThatCannotStartSaysWhy(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/nonexistent/claude"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return r.View().Done })
+	if !strings.Contains(r.Tail(), "could not start") || r.View().ExitCode == 0 {
+		t.Errorf("output %q exit %d", r.Tail(), r.View().ExitCode)
+	}
+}
+
+func TestLongOutputIsFollowedAndReplayedAfterRestart(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	// More output than a holder keeps, then a marker and a pause.
+	if err := m.Start(r, []string{"/bin/sh", "-c", "i=0; while [ $i -lt 30000 ]; do echo line-$i-padding-padding-padding; i=$((i+1)); done; echo END-MARK; sleep 30"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(r.Tail(), "END-MARK") })
+	// A second reader starting from nothing, as after a restart, sees the same screen.
+	again := &Run{ID: r.ID, Kind: "server", Started: r.Started}
+	m2 := NewManager(m.self, "")
+	m2.dir = m.dir
+	if !m2.Holding(again) {
+		t.Fatal("holder not reachable from a second manager")
+	}
+	again.read()
+	if !strings.Contains(again.Tail(), "END-MARK") || again.Pid() != r.Pid() {
+		t.Errorf("replayed screen is missing the end: %q", lastLines(again.Tail(), 3))
+	}
 }
