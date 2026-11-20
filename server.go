@@ -18,9 +18,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -35,6 +35,13 @@ type App struct {
 
 	statusMu sync.Mutex
 	status   map[string]map[string]any
+	statusAt map[string]time.Time
+
+	verMu   sync.Mutex
+	ver     string
+	verAt   time.Time
+	closing atomic.Bool
+	wantMu  sync.Mutex
 }
 
 func main() {
@@ -44,9 +51,10 @@ func main() {
 	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for per-account Claude config")
 	claude := flag.String("claude", "", "path to the claude binary (default: found on PATH)")
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
+	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Superdeck at login with these settings, then exit")
 	flag.Parse()
 
-	a := &App{root: *root, state: *state, mgr: NewManager(), status: map[string]map[string]any{}, hosts: map[string]bool{}}
+	a := &App{root: *root, state: *state, mgr: NewManager(), status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
 	bin := *claude
 	if bin == "" {
 		bin = "claude"
@@ -57,6 +65,19 @@ func main() {
 	}
 	if a.claude, err = filepath.Abs(p); err != nil {
 		log.Fatal(err)
+	}
+	if *agent {
+		self, err := os.Executable()
+		if err != nil {
+			log.Fatal(err)
+		}
+		args := []string{"-addr", *addr, "-root", a.root, "-state", a.state, "-claude", a.claude}
+		if *extra != "" {
+			args = append(args, "-hosts", *extra)
+		}
+		path := filepath.Dir(a.claude) + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+		fmt.Print(launchAgent(self, args, filepath.Join(a.state, "superdeck.log"), path))
+		return
 	}
 	if err := os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700); err != nil {
 		log.Fatal(err)
@@ -71,6 +92,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		log.Print("stopping claude processes")
+		a.closing.Store(true)
 		a.mgr.StopAll()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -78,6 +100,7 @@ func main() {
 	}()
 	log.Printf("superdeck on http://%s  projects=%s  claude=%s", *addr, a.root, a.claude)
 	log.Print("no sign-in yet: anyone who can reach this address can use it")
+	go a.restore()
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -121,7 +144,9 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{name}/refresh", a.handleAccountRefresh)
 	mux.HandleFunc("POST /api/projects", a.handleAddProject)
 	mux.HandleFunc("POST /api/servers", a.handleStartServer)
+	mux.HandleFunc("POST /api/update", a.handleUpdate)
 	mux.HandleFunc("POST /api/runs/{id}/stop", a.handleStop)
+	mux.HandleFunc("POST /api/runs/{id}/relaunch", a.handleRelaunch)
 	mux.HandleFunc("POST /api/runs/{id}/input", a.handleInput)
 	mux.HandleFunc("POST /api/runs/{id}/resize", a.handleResize)
 	mux.HandleFunc("GET /api/runs/{id}/stream", a.handleStream)
@@ -202,6 +227,7 @@ func (a *App) refreshStatus(name string) {
 	}
 	a.statusMu.Lock()
 	a.status[name] = st
+	a.statusAt[name] = time.Now()
 	a.statusMu.Unlock()
 }
 
@@ -214,7 +240,14 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 	for _, n := range a.accounts() {
 		a.statusMu.Lock()
 		st, ok := a.status[n]
+		stale := ok && time.Since(a.statusAt[n]) > 2*time.Minute
+		if stale {
+			a.statusAt[n] = time.Now() // one background re-check at a time
+		}
 		a.statusMu.Unlock()
+		if stale {
+			go a.refreshStatus(n)
+		}
 		if !ok {
 			a.refreshStatus(n)
 			a.statusMu.Lock()
@@ -224,7 +257,8 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 		accts = append(accts, acct{n, st})
 	}
 	writeJSON(w, map[string]any{
-		"root": a.root, "accounts": accts, "projects": listProjects(a.root), "runs": a.mgr.List(),
+		"root": tilde(a.root), "accounts": accts, "projects": listProjects(a.root), "runs": a.mgr.List(),
+		"claude": a.claudeVersion(),
 	})
 }
 
@@ -286,53 +320,6 @@ func (a *App) handleAddProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"project": rel})
 }
 
-func (a *App) handleStartServer(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Account, Project, Spawn string
-		Capacity                int
-	}
-	if !readJSON(w, r, &in) {
-		return
-	}
-	cfg, err := a.accountDir(in.Account)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	dir, err := resolveProject(a.root, in.Project)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if in.Spawn == "" {
-		in.Spawn = "worktree"
-	}
-	if in.Spawn != "worktree" && in.Spawn != "same-dir" {
-		http.Error(w, "spawn must be worktree or same-dir", http.StatusBadRequest)
-		return
-	}
-	if in.Spawn == "worktree" && !isGitRepo(dir) {
-		http.Error(w, "worktree mode needs a Git repository", http.StatusBadRequest)
-		return
-	}
-	if in.Capacity == 0 {
-		in.Capacity = 4
-	}
-	if in.Capacity < 1 || in.Capacity > 32 {
-		http.Error(w, "capacity must be between 1 and 32", http.StatusBadRequest)
-		return
-	}
-	name := filepath.Base(dir) + " (" + in.Account + ")"
-	argv := []string{a.claude, "remote-control", "--name", name,
-		"--spawn", in.Spawn, "--capacity", strconv.Itoa(in.Capacity)}
-	run := &Run{Kind: "server", Account: in.Account, Project: in.Project, Name: name, dir: dir}
-	if err := a.mgr.Start(run, argv, childEnv(cfg), nil); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, run.View())
-}
-
 func (a *App) run(w http.ResponseWriter, r *http.Request) *Run {
 	run := a.mgr.Get(r.PathValue("id"))
 	if run == nil {
@@ -343,29 +330,12 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) *Run {
 
 func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
 	if run := a.run(w, r); run != nil {
+		if run.Kind == "server" {
+			a.remember(wanted{Account: run.Account, Project: run.Project}, false)
+		}
 		run.Stop()
 		writeJSON(w, map[string]any{"ok": true})
 	}
-}
-
-func (a *App) handleInput(w http.ResponseWriter, r *http.Request) {
-	run := a.run(w, r)
-	if run == nil {
-		return
-	}
-	var in struct{ Data string }
-	if !readJSON(w, r, &in) {
-		return
-	}
-	if len(in.Data) == 0 || len(in.Data) > 4096 {
-		http.Error(w, "input must be 1 to 4096 bytes", http.StatusBadRequest)
-		return
-	}
-	if err := run.Input(in.Data); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (a *App) handleResize(w http.ResponseWriter, r *http.Request) {
@@ -448,4 +418,12 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// tilde shortens a path under the home directory for display.
+func tilde(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + p[len(home):]
+	}
+	return p
 }

@@ -9,91 +9,90 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div id="home">
-  <header class="top">
-    <div class="mark">super<b>deck</b></div>
-    <div class="meta" id="summary"></div>
-  </header>
+<header class="top">
+  <a class="mark" href="#/">super<b>deck</b></a>
+  <nav>
+    <a href="#/" id="nav-home">Instances</a>
+    <a href="#/accounts" id="nav-accounts">Accounts</a>
+  </nav>
+</header>
 
-  <section class="panel" id="launch" aria-labelledby="launch-h">
-    <h2 id="launch-h">Launch</h2>
-
-    <div class="field">
-      <span class="label">Account</span>
-      <div id="account-chips" class="chips"></div>
+<main>
+  <section id="view-home">
+    <div class="head">
+      <h1>Instances</h1>
+      <a class="btn primary" href="#/new">New instance</a>
     </div>
-
-    <div class="field">
-      <label class="label" for="filter">Project</label>
-      <input id="filter" type="search" placeholder="Filter projects" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-      <ul id="project-list" class="picker"></ul>
-    </div>
-
-    <div class="field">
-      <span class="label">Sessions work in</span>
-      <div class="seg" id="spawn">
-        <button type="button" data-v="worktree" aria-pressed="true">Separate worktrees</button>
-        <button type="button" data-v="same-dir" aria-pressed="false">One shared folder</button>
-      </div>
-      <p class="help" id="spawn-help"></p>
-    </div>
-
-    <button id="go" type="button" class="primary" disabled>Launch</button>
+    <div id="instances" class="rows"></div>
+    <p class="foot" id="foot"></p>
   </section>
 
-  <section aria-labelledby="runs-h">
-    <h2 id="runs-h">Running <span class="count" id="run-count"></span></h2>
-    <ul id="runs" class="cards"></ul>
-  </section>
+  <section id="view-new" hidden>
+    <div class="head">
+      <h1>New instance</h1>
+      <a class="btn" href="#/">Cancel</a>
+    </div>
 
-  <section aria-labelledby="accounts-h">
-    <h2 id="accounts-h">Accounts</h2>
-    <ul id="accounts" class="cards"></ul>
-    <form id="add-account" class="inline">
-      <input id="account-name" aria-label="New account label" placeholder="Label a new account, e.g. overton" pattern="[a-z0-9][a-z0-9-]{0,31}" required autocapitalize="none" autocorrect="off" spellcheck="false">
-      <button class="ghost">Add</button>
-    </form>
-    <p class="help">A label is a separate Claude login kept on this Mac. Lowercase letters, digits and dashes.</p>
-  </section>
+    <h2>Account</h2>
+    <div id="account-chips" class="chips"></div>
 
-  <section aria-labelledby="new-h">
-    <h2 id="new-h">New project</h2>
+    <h2><label for="filter">Folder</label></h2>
+    <input id="filter" type="search" placeholder="Filter folders" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
+    <div id="project-list" class="rows picker"></div>
     <form id="add-project" class="inline">
-      <input id="project-name" aria-label="New project folder name" placeholder="Folder name" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required autocapitalize="none" autocorrect="off" spellcheck="false">
-      <button class="ghost">Create</button>
+      <input id="project-name" aria-label="New folder name" placeholder="Or name a new folder" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required autocapitalize="none" autocorrect="off" spellcheck="false">
+      <button class="btn">Create</button>
     </form>
-    <p class="help" id="root-help"></p>
-  </section>
-</div>
 
-<div id="console" hidden>
-  <header class="bar">
-    <button id="back" type="button" class="ghost" aria-label="Back to deck">&#8249; Deck</button>
-    <div class="bar-title">
-      <strong id="console-title"></strong>
-      <span class="meta" id="console-state"></span>
+    <div class="launchbar">
+      <button id="go" type="button" class="btn primary big" disabled>Launch</button>
     </div>
-    <button id="stop" type="button" class="danger">Stop</button>
-  </header>
-  <p id="console-hint" class="notice" hidden></p>
-  <a id="console-url" class="primary" hidden target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a>
-  <div id="term"></div>
-  <div class="keys" id="keys" aria-label="Send a key">
-    <button type="button" data-k="&#13;" class="wide">Enter</button>
-    <button type="button" data-k="y">y</button>
-    <button type="button" data-k="n">n</button>
-    <button type="button" data-k="1">1</button>
-    <button type="button" data-k="2">2</button>
-    <button type="button" data-k="3">3</button>
-    <button type="button" data-k="&#27;[A" aria-label="Up">&#8593;</button>
-    <button type="button" data-k="&#27;[B" aria-label="Down">&#8595;</button>
-    <button type="button" data-k="&#27;">Esc</button>
-  </div>
-  <form id="paste" class="inline">
-    <input id="paste-text" aria-label="Text to send" placeholder="Paste a code or type a reply" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-    <button class="ghost">Send</button>
-  </form>
-</div>
+  </section>
+
+  <section id="view-accounts" hidden>
+    <div class="head"><h1>Accounts</h1></div>
+    <p class="lede">Each account is a separate Claude login kept on this Mac. Instances run under the account you pick.</p>
+    <div id="accounts" class="rows"></div>
+    <form id="add-account" class="inline">
+      <input id="account-name" aria-label="New account name" placeholder="Name a new account, e.g. overton" pattern="[a-z0-9][a-z0-9\-]{0,31}" required autocapitalize="none" autocorrect="off" spellcheck="false">
+      <button class="btn">Add</button>
+    </form>
+    <p class="small">Lowercase letters, digits and dashes.</p>
+  </section>
+
+  <section id="view-instance" hidden>
+    <a class="backlink" id="back" href="#/">&#8249; Instances</a>
+    <div class="head">
+      <div class="grow">
+        <h1 id="i-title"></h1>
+        <p class="meta" id="i-meta"></p>
+        <p class="meta" id="i-path"></p>
+      </div>
+      <button id="stop" type="button" class="btn danger">Stop</button>
+    </div>
+    <p id="i-hint" class="notice" hidden></p>
+    <p id="i-update" class="notice calm" hidden><span id="i-update-text"></span><button id="relaunch" type="button" class="btn">Relaunch</button></p>
+    <a id="i-url" class="btn primary big" hidden target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a>
+    <div id="term"></div>
+    <div id="i-input">
+      <div class="keys" id="keys" aria-label="Send a key">
+        <button type="button" data-k="enter" class="wide">Enter</button>
+        <button type="button" data-k="y">y</button>
+        <button type="button" data-k="n">n</button>
+        <button type="button" data-k="1">1</button>
+        <button type="button" data-k="2">2</button>
+        <button type="button" data-k="3">3</button>
+        <button type="button" data-k="up" aria-label="Up">&#8593;</button>
+        <button type="button" data-k="down" aria-label="Down">&#8595;</button>
+        <button type="button" data-k="esc">Esc</button>
+      </div>
+      <form id="paste" class="inline">
+        <input id="paste-text" aria-label="Sign-in code" placeholder="Paste the code from Anthropic's page" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
+        <button class="btn">Send</button>
+      </form>
+    </div>
+  </section>
+</main>
 
 <p id="error" role="alert" hidden></p>
 

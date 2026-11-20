@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -67,7 +68,7 @@ func TestChildEnvIsExplicit(t *testing.T) {
 
 func testApp(t *testing.T) *App {
 	a := &App{root: t.TempDir(), state: t.TempDir(), mgr: NewManager(),
-		status: map[string]map[string]any{}, hosts: map[string]bool{}}
+		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
 	os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700)
 	if err := a.allowHosts("127.0.0.1:7433", ""); err != nil {
 		t.Fatal(err)
@@ -129,6 +130,9 @@ func TestRunLifecycle(t *testing.T) {
 	if err := r.Input("yes\r"); err != nil {
 		t.Fatal(err)
 	}
+	if h := r.View().Hint; h != "" {
+		t.Errorf("hint %q still showing after the prompt was answered", h)
+	}
 	waitFor(t, func() bool { return r.View().Done })
 	snap, ch := r.Subscribe()
 	if ch != nil || !strings.Contains(string(snap), "got=yes") {
@@ -157,4 +161,157 @@ func waitFor(t *testing.T, ok func() bool) {
 		}
 	}
 	t.Fatal("timed out")
+}
+
+// fakeClaude stands in for the real CLI: it answers the version and status
+// questions and "serves" until killed.
+func fakeClaude(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude")
+	script := `#!/bin/sh
+case "$1 $2" in
+  "--version "*) echo "9.9.9 (Claude Code)" ;;
+  "auth status") echo '{"loggedIn":true,"email":"t@example.com"}' ;;
+  "remote-control "*) echo "serving $*"; sleep 600 ;;
+  *) echo "unexpected: $*"; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func serverApp(t *testing.T) *App {
+	a := testApp(t)
+	a.claude = fakeClaude(t)
+	os.MkdirAll(filepath.Join(a.state, "accounts", "work"), 0o700)
+	if _, err := createProject(a.root, "app"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.closing.Store(true); a.mgr.StopAll() })
+	return a
+}
+
+func servers(a *App) []RunView {
+	var out []RunView
+	for _, v := range a.mgr.List() {
+		if v.Kind == "server" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
+	minLife, restartBase = 0, 10*time.Millisecond
+	a := serverApp(t)
+	first, err := a.startServer("work", "app", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Version != "9.9.9" {
+		t.Errorf("version %q", first.Version)
+	}
+	waitFor(t, func() bool { snap, _ := first.Subscribe(); return strings.Contains(string(snap), "serving") })
+	snap, _ := first.Subscribe()
+	if !strings.Contains(string(snap), "remote-control --name app (work) --spawn worktree --capacity 4") {
+		t.Errorf("unexpected command line: %s", snap)
+	}
+
+	syscall.Kill(-first.cmd.Process.Pid, syscall.SIGKILL) // dies on its own
+	waitFor(t, func() bool { return len(servers(a)) == 2 })
+	second := a.mgr.Get(servers(a)[0].ID)
+	if second.Restarts != 1 || !second.alive() {
+		t.Fatalf("restart: restarts=%d alive=%v", second.Restarts, second.alive())
+	}
+
+	second.Stop() // a person stopped it
+	waitFor(t, func() bool { return !second.alive() })
+	time.Sleep(150 * time.Millisecond)
+	if n := len(servers(a)); n != 2 {
+		t.Errorf("a stopped instance was restarted: %d runs", n)
+	}
+}
+
+func TestStartServerRejectsBadInput(t *testing.T) {
+	a := serverApp(t)
+	os.MkdirAll(filepath.Join(a.root, "plain"), 0o755)
+	for _, c := range []struct{ account, project, spawn string }{
+		{"nope", "app", ""}, {"../work", "app", ""}, {"work", "../app", ""}, {"work", "/etc", "same-dir"},
+		{"work", "app", "session"}, {"work", "app", "worktree --dangerously-skip-permissions"}, {"work", "plain", "worktree"},
+	} {
+		if _, err := a.startServer(c.account, c.project, c.spawn, 0, 0); err == nil {
+			t.Errorf("startServer(%q, %q, %q) succeeded", c.account, c.project, c.spawn)
+		}
+	}
+	if _, err := a.startServer("work", "app", "", 99, 0); err == nil {
+		t.Error("capacity 99 accepted")
+	}
+}
+
+func TestInputIsLimitedToKeysAndCodes(t *testing.T) {
+	a := testApp(t)
+	h := a.routes()
+	start := func(kind string) *Run {
+		r := &Run{Kind: kind, Account: kind, dir: t.TempDir()}
+		if err := a.mgr.Start(r, []string{"/bin/cat"}, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(r.Stop)
+		return r
+	}
+	server, login := start("server"), start("login")
+	post := func(r *Run, body string) int {
+		req := httptest.NewRequest("POST", "/api/runs/"+r.ID+"/input", strings.NewReader(body))
+		req.Host = "127.0.0.1:7433"
+		req.Header.Set("Origin", "http://127.0.0.1:7433")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	cases := []struct {
+		run  *Run
+		body string
+		want int
+	}{
+		{server, `{"key":"enter"}`, 200},
+		{server, `{"key":"y"}`, 200},
+		{server, `{"key":"rm -rf ~"}`, 400},
+		{server, `{"data":"anything\r"}`, 400},
+		{server, `{"code":"abc123"}`, 400}, // codes only go to a sign-in
+		{login, `{"code":"abc123#state-XYZ"}`, 200},
+		{login, `{"code":"abc; rm -rf ~"}`, 400},
+		{login, `{"code":"line1\nline2"}`, 400},
+	}
+	for _, c := range cases {
+		if got := post(c.run, c.body); got != c.want {
+			t.Errorf("%s input %s: status %d, want %d", c.run.Kind, c.body, got, c.want)
+		}
+	}
+}
+
+func TestInstancesComeBackAfterSuperdeckRestarts(t *testing.T) {
+	a := serverApp(t)
+	a.remember(wanted{"work", "app", "worktree", 4}, true)
+	a.remember(wanted{"work", "../../etc", "same-dir", 1}, true) // a tampered entry
+	a.remember(wanted{"gone", "app", "worktree", 4}, true)
+	a.remember(wanted{"gone", "app", "", 0}, false) // stopped by a person
+
+	next := &App{root: a.root, state: a.state, claude: a.claude, mgr: NewManager(),
+		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
+	t.Cleanup(func() { next.closing.Store(true); next.mgr.StopAll() })
+	next.restore()
+	got := servers(next)
+	if len(got) != 1 || got[0].Project != "app" || got[0].Account != "work" {
+		t.Fatalf("restored %+v, want only work/app", got)
+	}
+}
+
+func TestLaunchAgentEscapesArguments(t *testing.T) {
+	out := launchAgent("/bin/superdeck", []string{"-root", "/Users/a&b/<Projects>"}, "/tmp/log", "/usr/bin")
+	if !strings.Contains(out, "<string>/Users/a&amp;b/&lt;Projects&gt;</string>") || strings.Contains(out, "a&b") {
+		t.Errorf("arguments not escaped:\n%s", out)
+	}
 }

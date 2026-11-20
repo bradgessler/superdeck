@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -33,7 +34,10 @@ var (
 // inherited implicitly, so one account's variables (or the launcher's own
 // CLAUDE_* / ANTHROPIC_* variables) cannot leak into another account's process.
 func childEnv(configDir string) []string {
-	env := []string{"TERM=xterm-256color", "CLAUDE_CONFIG_DIR=" + configDir}
+	env := []string{"TERM=xterm-256color"}
+	if configDir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
+	}
 	for _, k := range []string{"HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "SSH_AUTH_SOCK"} {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)
@@ -49,11 +53,19 @@ func childEnv(configDir string) []string {
 // Run is one supervised claude process attached to a pseudo-terminal.
 type Run struct {
 	ID      string    `json:"id"`
-	Kind    string    `json:"kind"` // "login" or "server"
+	Kind    string    `json:"kind"` // "server", "login" or "update"
 	Account string    `json:"account"`
 	Project string    `json:"project,omitempty"`
 	Name    string    `json:"name"`
 	Started time.Time `json:"started"`
+	// Version is the Claude Code version this process was started with.
+	Version string `json:"version,omitempty"`
+	// Restarts counts automatic restarts in a row that led to this process.
+	Restarts int `json:"restarts,omitempty"`
+
+	spawn    string
+	capacity int
+	stopped  bool // someone asked for this process to stop
 
 	dir    string
 	cmd    *exec.Cmd
@@ -73,6 +85,7 @@ type RunView struct {
 	*Run
 	Done     bool   `json:"done"`
 	ExitCode int    `json:"exitCode"`
+	Stopped  bool   `json:"stopped"` // a person stopped it
 	Hint     string `json:"hint,omitempty"`
 	URL      string `json:"url,omitempty"`
 }
@@ -80,7 +93,7 @@ type RunView struct {
 func (r *Run) View() RunView {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode}
+	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped}
 	recent := r.tail
 	if len(recent) > 2048 {
 		recent = recent[len(recent)-2048:]
@@ -109,7 +122,12 @@ func (r *Run) append(b []byte) {
 	if len(r.buf) > maxBuffer {
 		r.buf = append([]byte(nil), r.buf[len(r.buf)-maxBuffer:]...)
 	}
-	r.tail += ansiRe.ReplaceAllString(string(chunk), "")
+	// A cleared screen means whatever prompt was showing is gone.
+	text := string(chunk)
+	if i := strings.LastIndex(text, "\x1b[2J"); i >= 0 {
+		r.tail, text = "", text[i:]
+	}
+	r.tail += ansiRe.ReplaceAllString(text, "")
 	if len(r.tail) > maxTail {
 		r.tail = r.tail[len(r.tail)-maxTail:]
 	}
@@ -147,10 +165,20 @@ func (r *Run) alive() bool {
 	return !r.done
 }
 
+func (r *Run) wasStopped() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopped
+}
+
 func (r *Run) Input(data string) error {
 	if !r.alive() {
 		return errors.New("process has exited")
 	}
+	// Once a prompt has been answered it no longer describes the process.
+	r.mu.Lock()
+	r.tail = ""
+	r.mu.Unlock()
 	_, err := r.tty.WriteString(data)
 	return err
 }
@@ -164,6 +192,9 @@ func (r *Run) Resize(cols, rows int) error {
 
 // Stop asks the whole process group to exit, then kills it if it lingers.
 func (r *Run) Stop() {
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
 	if !r.alive() {
 		return
 	}
@@ -209,8 +240,8 @@ func (r *Run) pump() {
 	}
 }
 
-// Manager owns every Run. It only ever starts the two fixed command shapes
-// built in server.go; there is no way to pass it an arbitrary command.
+// Manager owns every Run. It only ever starts the fixed command shapes built
+// in server.go and instances.go; no request can hand it a command.
 type Manager struct {
 	mu   sync.Mutex
 	runs map[string]*Run
