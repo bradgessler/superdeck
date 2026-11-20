@@ -80,6 +80,7 @@ type Run struct {
 	onExit func(*Run)
 
 	mu       sync.Mutex
+	vtBroken bool   // the emulator choked on this output; show plain text instead
 	tail     string // recent output as plain text
 	stopped  bool   // someone asked for this process to stop
 	done     bool
@@ -123,8 +124,27 @@ func (r *Run) View() RunView {
 	return v
 }
 
-func (r *Run) append(b []byte) {
+// feed passes output to the terminal emulator. The emulator is third-party
+// code parsing whatever a process prints, so a panic in it must never take
+// Superdeck, and every instance with it, down.
+func (r *Run) feed(b []byte) {
+	defer func() {
+		if recover() != nil {
+			r.mu.Lock()
+			r.vtBroken = true
+			r.mu.Unlock()
+		}
+	}()
 	r.vt.Write(b)
+}
+
+func (r *Run) append(b []byte) {
+	r.mu.Lock()
+	broken := r.vtBroken
+	r.mu.Unlock()
+	if !broken {
+		r.feed(b)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// A cleared screen means whatever prompt was showing is gone.
@@ -190,7 +210,19 @@ func cssColor(c vt10x.Color) string {
 // Screen renders the terminal emulator's current screen as HTML. Every
 // character from the process is escaped; the only markup is colour spans whose
 // values are generated here.
-func (r *Run) Screen() template.HTML {
+func (r *Run) Screen() (out template.HTML) {
+	plain := func() template.HTML { return template.HTML(html.EscapeString(lastLines(r.Tail(), 40))) }
+	r.mu.Lock()
+	broken := r.vtBroken
+	r.mu.Unlock()
+	if broken {
+		return plain()
+	}
+	defer func() {
+		if recover() != nil {
+			out = plain()
+		}
+	}()
 	r.vt.Lock()
 	defer r.vt.Unlock()
 	cols, rows := r.vt.Size()
@@ -272,6 +304,7 @@ func (r *Run) Resize(cols, rows int) {
 	if !r.alive() {
 		return
 	}
+	defer func() { recover() }()
 	if c, rw := r.vt.Size(); c == cols && rw == rows {
 		return
 	}

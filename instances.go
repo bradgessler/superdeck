@@ -33,6 +33,7 @@ var (
 	maxRestarts = 8
 
 	loginTimeout = 15 * time.Minute
+	bootRetry    = 30 * time.Second
 )
 
 // An account is a Claude config directory plus the name shown for it. Claude
@@ -194,7 +195,20 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 // stopped, anything that failed at startup, and anything waiting on a sign-in
 // or trust decision, since restarting those would only loop.
 func (a *App) serverExited(r *Run) {
-	if a.closing.Load() || r.wasStopped() || r.View().Hint != "" {
+	if a.closing.Load() || r.wasStopped() {
+		return
+	}
+	hint := r.View().Hint
+	// Right after the Mac starts, the Keychain may not be readable yet and
+	// Claude reports the account as signed out. Try again a few times before
+	// believing it.
+	if hint == "needs-login" && time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
+		n := r.Restarts + 1
+		log.Printf("%s reported signed out soon after startup; retrying in 30s (attempt %d)", r.Name, n)
+		time.AfterFunc(bootRetry, func() { a.restart(r, n) })
+		return
+	}
+	if hint != "" {
 		return
 	}
 	life := time.Since(r.Started)
@@ -214,14 +228,21 @@ func (a *App) serverExited(r *Run) {
 		delay = 5 * time.Minute
 	}
 	log.Printf("%s exited on its own after %s; restarting in %s (attempt %d)", r.Name, life.Round(time.Second), delay, n)
-	time.AfterFunc(delay, func() {
-		if a.closing.Load() {
-			return
+	time.AfterFunc(delay, func() { a.restart(r, n) })
+}
+
+func (a *App) restart(r *Run, n int) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("%s: restart panicked: %v", r.Name, p)
 		}
-		if _, err := a.startServer(r.Account, r.Project, r.spawn, r.capacity, n); err != nil {
-			log.Printf("%s: restart failed: %v", r.Name, err)
-		}
-	})
+	}()
+	if a.closing.Load() {
+		return
+	}
+	if _, err := a.startServer(r.Account, r.Project, r.spawn, r.capacity, n); err != nil {
+		log.Printf("%s: restart failed: %v", r.Name, err)
+	}
 }
 
 // relaunch stops an instance and starts it again with the same account and

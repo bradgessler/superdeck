@@ -563,3 +563,45 @@ func TestAbandonedSignInExpires(t *testing.T) {
 		t.Errorf("could not start a fresh sign-in afterwards: %v", err)
 	}
 }
+
+func TestGarbageOutputCannotCrashSuperdeck(t *testing.T) {
+	m := NewManager()
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/bin/sh", "-c", "head -c 200000 /dev/urandom; printf '\\033[999999;999999H\\033[9999999A\\033[?1049h\\033[2J\\033]0;'; head -c 5000 /dev/urandom"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return r.View().Done })
+	for _, size := range [][2]int{{1, 1}, {300, 100}, {46, 24}} {
+		r.mu.Lock()
+		r.done = false // let Resize through for the purpose of the test
+		r.mu.Unlock()
+		r.Resize(size[0], size[1])
+		_ = r.Screen()
+	}
+	r.mu.Lock()
+	r.done = true
+	r.mu.Unlock()
+}
+
+func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
+	minLife, bootRetry = 0, 30*time.Millisecond
+	t.Cleanup(func() { bootRetry = 30 * time.Second })
+	a := testApp(t)
+	// The account looks signed out at first, as when the Keychain is not yet
+	// unlocked, and becomes readable a moment later.
+	marker := filepath.Join(a.state, "accounts", "work", "in")
+	os.Remove(marker)
+	if _, err := a.startServer("work", "app", "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	os.WriteFile(marker, nil, 0o600)
+	waitFor(t, func() bool {
+		for _, v := range servers(a) {
+			if !v.Done && strings.Contains(v.Tail(), "serving") {
+				return true
+			}
+		}
+		return false
+	})
+}

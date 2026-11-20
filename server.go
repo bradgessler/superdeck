@@ -40,10 +40,11 @@ type App struct {
 	verAt   time.Time
 	closing atomic.Bool
 	wantMu  sync.Mutex
+	started time.Time
 }
 
 func newApp(root, state, claude string) *App {
-	return &App{root: root, state: state, claude: claude, mgr: NewManager(),
+	return &App{root: root, state: state, claude: claude, mgr: NewManager(), started: time.Now(),
 		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
 }
 
@@ -89,7 +90,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
+	rotateLog(filepath.Join(a.state, "superdeck.log"))
+	srv := &http.Server{Addr: *addr, Handler: a.routes(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 60 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -152,6 +156,7 @@ func (a *App) guard(next http.Handler) http.Handler {
 				return
 			}
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
@@ -239,4 +244,12 @@ func tilde(p string) string {
 		return "~" + p[len(home):]
 	}
 	return p
+}
+
+// rotateLog keeps the log launchd appends to from growing without bound: once
+// it passes 5 MB the old one is set aside and a new one starts.
+func rotateLog(path string) {
+	if st, err := os.Stat(path); err == nil && st.Size() > 5<<20 {
+		os.Rename(path, path+".1")
+	}
 }
