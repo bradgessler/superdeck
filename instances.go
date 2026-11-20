@@ -289,7 +289,8 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 		"--spawn", spawn, "--capacity", strconv.Itoa(capacity)}
 	run := &Run{Kind: "server", Account: accountID, Project: dir, Name: name,
 		Version: a.claudeVersion(), Restarts: restarts, dir: dir, spawn: spawn, capacity: capacity}
-	if err := a.mgr.Start(run, argv, childEnv(cfg), a.exitHook(run)); err != nil {
+	a.installSkill(cfg)
+	if err := a.mgr.Start(run, argv, append(childEnv(cfg), a.sessionEnv(accountID, dir)...), a.exitHook(run)); err != nil {
 		return nil, err
 	}
 	a.proveLater(run)

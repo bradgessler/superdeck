@@ -99,6 +99,8 @@ func main() {
 			os.Exit(holdMain(os.Args[2:]))
 		case "attach":
 			os.Exit(attachMain(filepath.Join(home, ".superdeck"), os.Args[2:]))
+		case "accounts", "move", "handoff": // run by Claude inside an instance; see control.go
+			os.Exit(controlMain(os.Args[1], os.Args[2:], os.Stdin, os.Stdout))
 		}
 	}
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
@@ -203,6 +205,7 @@ func main() {
 	if err := a.adopt(); err != nil {
 		log.Fatal(err)
 	}
+	a.serveControl()
 	go a.restore()
 	for _, f := range []string{"superdeck.log", "holders.log"} {
 		os.Chmod(filepath.Join(a.state, f), 0o600)

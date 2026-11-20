@@ -76,11 +76,16 @@ func childEnv(configDir string) []string {
 // directory under the home directory. It is not put in a temporary directory:
 // those get cleaned, and a holder whose socket has been cleaned away can no
 // longer be reached.
+var runBase string // tests put their sockets somewhere they can clear away
+
 func runDir(state string) string {
 	dir := filepath.Join(state, "run")
 	if len(dir) > 70 {
 		sum := sha256.Sum256([]byte(state))
 		name := "superdeck-" + hex.EncodeToString(sum[:6])
+		if runBase != "" {
+			return filepath.Join(runBase, name)
+		}
 		if home, err := os.UserHomeDir(); err == nil && len(home) < 50 {
 			return filepath.Join(home, ".superdeck-run", name)
 		}
@@ -766,6 +771,9 @@ func (m *Manager) Leftovers() []string {
 	var ids []string
 	for _, e := range es {
 		id, _, _ := strings.Cut(e.Name(), ".")
+		if id == "control" { // the socket sessions use to reach Superdeck; see control.go
+			continue
+		}
 		if id != "" && !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)

@@ -12,7 +12,7 @@ These came from the person who owns this project. Treat them as requirements.
 2. **One job per screen, and less on it.** See the `superdeck-ui` skill before touching templates or CSS.
 3. **Drive Claude on the server; show purpose-built controls.** Do not show a raw terminal where a button or a sentence will do. The terminal has its own screen for when it is needed.
 4. **Restrict what can be run, not who can reach it.** There is no sign-in, by the owner's choice. Superdeck is meant to be reachable only on a private network. It runs a short fixed list of commands with arguments it builds itself. Do not add authentication unless asked. Do add validation. Be honest in the docs about the limit of this: whoever can reach the page can sign in their own Claude account and drive Claude on the Mac.
-5. **Use Anthropic's binary as it is.** Never pass `--dangerously-skip-permissions` or a permission-mode override, never edit Claude's config to pre-trust a folder, never read, copy or store Claude credentials. Sign-in happens on Anthropic's page.
+5. **Use Anthropic's binary as it is.** Never pass `--dangerously-skip-permissions` or a permission-mode override, never edit Claude's config to pre-trust a folder, never read, copy or store Claude credentials. The one thing Superdeck writes into an account's config directory is its own skill, in its own folder; it does not touch settings, hooks or MCP servers there. Sign-in happens on Anthropic's page.
 6. **Survive failure.** Anything that can crash should be supervised or contained. See "What happens when things go wrong" in the README and keep it true.
 7. **Few dependencies, well-known ones.** Prefer the standard library, then a battle-tested package.
 
@@ -31,6 +31,8 @@ These came from the person who owns this project. Treat them as requirements.
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
 | `hold.go` | the holder: a detached copy of this binary that keeps one Claude process alive, and `superdeck attach` |
 | `proc.go` | Superdeck's side of a held process: polling it, emulating its terminal, prompt detection |
+| `control.go` | how a Claude session reaches Superdeck: the local socket, `superdeck move`, handoff notes, installing the skill |
+| `skill/SKILL.md` | the skill given to every instance, compiled into the binary. This is a prompt: edit it with the care you would give code |
 | `paths.go` | allowed folders, folder listing, path confinement |
 | `store.go` | the SQLite store and migration runner |
 | `migrations/` | numbered SQL schema changes, compiled into the binary |

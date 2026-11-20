@@ -119,6 +119,8 @@ What the restrictions below do buy is that reaching the page gives no shortcut a
 - **Escaped output.** Everything a process prints is HTML-escaped before it is shown. The sign-in button only ever points at an Anthropic address.
 - **No cross-site driving.** Every request must carry an expected `Host` header (a name you listed, a numeric address, or the Mac's own name; never a name someone else could point at your Mac) and every state-changing request must be same-origin, so a web page elsewhere cannot drive Superdeck through your browser. Browsers that say where a request came from are refused when it came from another site.
 - **Clean environment.** Child processes get an explicit environment. The launcher's own `CLAUDE_*` and `ANTHROPIC_*` variables are not passed on.
+- **A narrow door for sessions.** A Claude session can ask Superdeck to list accounts, move its own instance, and keep or show handoff notes. It does so over a Unix socket only you can open. Account names are matched against the accounts that exist and never reach a command line.
+- **One file in Claude's config.** Superdeck writes its own skill into each account's config directory (`skills/superdeck/SKILL.md`). It changes nothing else there: no settings, no hooks, no MCP servers, no trust.
 - **No shortcuts around Claude's safeguards.** It never passes `--dangerously-skip-permissions` or a permission-mode override, and never edits Claude's config to pre-trust a folder. It never reads or stores Claude credentials.
 - **A record.** Every state-changing request is written to the log with its address and the network address it came from. It does not record what was typed.
 - **Private files.** Its database, log and sockets are readable only by you.
@@ -146,6 +148,21 @@ State lives in `~/.superdeck`:
 | `holders.log` | Anything a holder had to say about its own failures |
 
 Go dependencies: [creack/pty](https://github.com/creack/pty) for pseudo-terminals, [hinshun/vt10x](https://github.com/hinshun/vt10x) for terminal emulation, [modernc.org/sqlite](https://modernc.org/sqlite) (SQLite in pure Go, so the binary stays self-contained), [pressly/goose](https://github.com/pressly/goose) for migrations and `golang.org/x/term` for `attach`. No Node, no build step for the front end.
+
+## Moving work between accounts from inside Claude
+
+When one account runs out of usage, tell Claude in the session: "move this to rocketship". Claude commits what it has, writes handoff notes, and Superdeck restarts the instance under the other account. Start a new session for the folder in the Claude app and say "pick up where we left off"; it reads the notes and carries on.
+
+How it works:
+
+- Every instance is started with a small skill (`skills/superdeck` in the account's config directory) and the path of the Superdeck binary in `$SUPERDECK`.
+- The skill has Claude run `superdeck accounts`, `superdeck move NAME` or `superdeck handoff`. These talk to the running Superdeck over a Unix socket in its private run directory.
+- A session can move the instance it is running in, and nothing else. Superdeck checks the move can work (the account exists, is signed in, and is not already running that folder) before it stops anything.
+- The notes are kept in Superdeck's state directory, per folder, not in your repository.
+
+What it cannot do: carry the conversation itself across. A conversation belongs to the Claude account it was started under, so the move ends it and the next session starts from the notes and the files. Claude may also ask your permission in the app before running the command, like any other.
+
+You can move an instance from its page in Superdeck too; that way there are no notes.
 
 ## What happens when things go wrong
 

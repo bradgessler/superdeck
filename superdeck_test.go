@@ -143,6 +143,7 @@ case "$1 $2" in
     fi
     if [ -f "$C/asks-other" ]; then printf "Share anonymous usage data? (y/n) "; read x; echo "answered=$x"; fi
     echo "serving $*"
+    echo "reach=$SUPERDECK_ACCOUNT|$SUPERDECK_FOLDER|$SUPERDECK_SOCK"
     echo "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_0123456789abcdefABCDEFxyz"
     echo "Or ask Claude to work in this folder"; sleep 600 ;;
   "update "*) echo "Claude Code is up to date" ;;
@@ -185,7 +186,13 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "hold" {
 		os.Exit(holdMain(os.Args[2:]))
 	}
-	os.Exit(m.Run())
+	// Test state lives under long temporary paths, too long for a socket.
+	// Keep the sockets somewhere short that is removed afterwards, not in
+	// the home directory of whoever runs the tests.
+	runBase, _ = os.MkdirTemp("/tmp", "sdtest")
+	code := m.Run()
+	os.RemoveAll(runBase)
+	os.Exit(code)
 }
 
 // testManager is a Manager whose processes are stopped after the test.
