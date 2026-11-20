@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log"
-	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -28,7 +31,102 @@ var (
 	minLife     = 30 * time.Second // shorter-lived exits are startup failures, not crashes
 	restartBase = 5 * time.Second
 	maxRestarts = 8
+
+	loginTimeout = 15 * time.Minute
 )
+
+// An account is a Claude config directory plus the name shown for it. Claude
+// keys each login to the directory's path, so the directory never moves once
+// created; renaming an account only changes the name.
+type account struct{ ID, Name string }
+
+func (a *App) namesPath() string { return filepath.Join(a.state, "accounts.json") }
+
+func (a *App) names() map[string]string {
+	m := map[string]string{}
+	if b, err := os.ReadFile(a.namesPath()); err == nil {
+		json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func (a *App) accountList() []account {
+	names := a.names()
+	out := []account{}
+	for _, id := range a.accounts() {
+		n := names[id]
+		if !accountNameRe.MatchString(n) {
+			n = id
+		}
+		out = append(out, account{id, n})
+	}
+	return out
+}
+
+func (a *App) accountName(id string) string {
+	for _, ac := range a.accountList() {
+		if ac.ID == id {
+			return ac.Name
+		}
+	}
+	return id
+}
+
+func (a *App) nameTaken(name, exceptID string) bool {
+	for _, ac := range a.accountList() {
+		if ac.Name == name && ac.ID != exceptID {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) setName(id, name string) error {
+	if !accountNameRe.MatchString(name) {
+		return errors.New("account names use lowercase letters, digits and dashes")
+	}
+	if _, err := a.accountDir(id); err != nil {
+		return err
+	}
+	if a.nameTaken(name, id) {
+		return errors.New("another account already has that name")
+	}
+	a.wantMu.Lock()
+	defer a.wantMu.Unlock()
+	m := a.names()
+	m[id] = name
+	b, _ := json.MarshalIndent(m, "", "  ")
+	tmp := a.namesPath() + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.namesPath())
+}
+
+// addAccount creates a config directory for a new account and returns its id.
+func (a *App) addAccount(name string) (string, error) {
+	if !accountNameRe.MatchString(name) {
+		return "", errors.New("account names use lowercase letters, digits and dashes")
+	}
+	if a.nameTaken(name, "") {
+		return "", errors.New("an account already has that name")
+	}
+	id := name
+	if _, err := os.Stat(filepath.Join(a.state, "accounts", id)); err == nil {
+		b := make([]byte, 3)
+		rand.Read(b)
+		id = name + "-" + hex.EncodeToString(b)
+	}
+	if err := os.Mkdir(filepath.Join(a.state, "accounts", id), 0o700); err != nil {
+		return "", err
+	}
+	if id != name {
+		if err := a.setName(id, name); err != nil {
+			return "", err
+		}
+	}
+	return id, nil
+}
 
 // claudeVersion is the installed CLI version, re-read at most once a minute
 // so a background update of the CLI is noticed without constant polling.
@@ -53,8 +151,8 @@ func (a *App) claudeVersion() string {
 
 // startServer launches `claude remote-control` for one account in one folder.
 // Every argument is built here from validated values.
-func (a *App) startServer(account, project, spawn string, capacity, restarts int) (*Run, error) {
-	cfg, err := a.accountDir(account)
+func (a *App) startServer(accountID, project, spawn string, capacity, restarts int) (*Run, error) {
+	cfg, err := a.accountDir(accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +167,7 @@ func (a *App) startServer(account, project, spawn string, capacity, restarts int
 		return nil, errors.New("spawn must be worktree or same-dir")
 	}
 	if spawn == "worktree" && !isGitRepo(dir) {
-		return nil, errors.New("this folder is not a Git repository")
+		return nil, errors.New("that folder is not a Git repository")
 	}
 	if capacity == 0 {
 		capacity = 4
@@ -77,13 +175,13 @@ func (a *App) startServer(account, project, spawn string, capacity, restarts int
 	if capacity < 1 || capacity > 32 {
 		return nil, errors.New("capacity must be between 1 and 32")
 	}
-	name := filepath.Base(dir) + " (" + account + ")"
+	name := filepath.Base(dir) + " (" + a.accountName(accountID) + ")"
 	if strings.HasPrefix(name, "-") {
 		name = "project " + name // never let a folder name read as a flag
 	}
 	argv := []string{a.claude, "remote-control", "--name", name,
 		"--spawn", spawn, "--capacity", strconv.Itoa(capacity)}
-	run := &Run{Kind: "server", Account: account, Project: project, Name: name,
+	run := &Run{Kind: "server", Account: accountID, Project: project, Name: name,
 		Version: a.claudeVersion(), Restarts: restarts, dir: dir, spawn: spawn, capacity: capacity}
 	if err := a.mgr.Start(run, argv, childEnv(cfg), a.serverExited); err != nil {
 		return nil, err
@@ -126,51 +224,45 @@ func (a *App) serverExited(r *Run) {
 	})
 }
 
-func (a *App) handleStartServer(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Account, Project, Spawn string
-		Capacity                int
-	}
-	if !readJSON(w, r, &in) {
-		return
-	}
-	run, err := a.startServer(in.Account, in.Project, in.Spawn, in.Capacity, 0)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
-	writeJSON(w, run.View())
-}
-
-// handleRelaunch stops an instance and starts it again with the same account
-// and folder, which is how it picks up a newer Claude Code.
-func (a *App) handleRelaunch(w http.ResponseWriter, r *http.Request) {
-	old := a.run(w, r)
-	if old == nil {
-		return
-	}
+// relaunch stops an instance and starts it again with the same account and
+// folder, which is how it picks up a newer Claude Code.
+func (a *App) relaunch(old *Run) (*Run, error) {
 	if old.Kind != "server" {
-		http.Error(w, "only instances can be relaunched", http.StatusBadRequest)
-		return
+		return nil, errors.New("only instances can be relaunched")
 	}
 	old.Stop()
 	for deadline := time.Now().Add(8 * time.Second); old.alive(); time.Sleep(50 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			http.Error(w, "the instance did not stop in time; try again", http.StatusConflict)
-			return
+			return nil, errors.New("the instance did not stop in time; try again")
 		}
 	}
-	run, err := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, run.View())
+	return a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
 }
 
-// handleUpdate runs Anthropic's own `claude update`. It never runs unasked.
-func (a *App) handleUpdate(w http.ResponseWriter, r *http.Request) {
+// startLogin runs Anthropic's own `claude auth login` for one account. The
+// sign-in itself happens on Anthropic's page.
+func (a *App) startLogin(accountID string) (*Run, error) {
+	dir, err := a.accountDir(accountID)
+	if err != nil {
+		return nil, err
+	}
+	run := &Run{Kind: "login", Account: accountID, Name: "Sign in " + a.accountName(accountID), dir: dir}
+	err = a.mgr.Start(run, []string{a.claude, "auth", "login", "--claudeai"}, childEnv(dir),
+		func(*Run) { a.refreshStatus(accountID) })
+	if err != nil {
+		return nil, err
+	}
+	// An abandoned sign-in should not sit there forever.
+	time.AfterFunc(loginTimeout, func() {
+		if run.alive() {
+			run.Stop()
+		}
+	})
+	return run, nil
+}
+
+// startUpdate runs Anthropic's own `claude update`. It never runs unasked.
+func (a *App) startUpdate() (*Run, error) {
 	run := &Run{Kind: "update", Name: "Update Claude Code", Version: a.claudeVersion(), dir: a.state}
 	err := a.mgr.Start(run, []string{a.claude, "update"}, childEnv(""), func(*Run) {
 		a.verMu.Lock()
@@ -178,44 +270,43 @@ func (a *App) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		a.verMu.Unlock()
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+		return nil, err
 	}
-	writeJSON(w, run.View())
+	return run, nil
 }
 
-func (a *App) handleInput(w http.ResponseWriter, r *http.Request) {
-	run := a.run(w, r)
-	if run == nil {
-		return
+// answer replies yes or no to a question Claude is asking. Some prompts take
+// a single keypress and some want Enter after it, so Enter is sent only if
+// nothing but the echoed letter has appeared since.
+func answer(run *Run, yes bool) error {
+	k := "n"
+	if yes {
+		k = "y"
 	}
-	var in struct{ Key, Code string }
-	if !readJSON(w, r, &in) {
-		return
+	if err := run.Input(k); err != nil {
+		return err
 	}
-	var data string
-	switch {
-	case in.Key != "":
-		k, ok := keys[in.Key]
-		if !ok {
-			http.Error(w, "that key is not allowed", http.StatusBadRequest)
-			return
-		}
-		data = k
-	case in.Code != "":
-		code := strings.TrimSpace(in.Code)
-		if run.Kind != "login" || !codeRe.MatchString(code) {
-			http.Error(w, "that does not look like a sign-in code", http.StatusBadRequest)
-			return
-		}
-		data = code + "\r"
-	default:
-		http.Error(w, "send a key or a code", http.StatusBadRequest)
-		return
+	time.Sleep(700 * time.Millisecond)
+	if t := strings.TrimSpace(run.Tail()); run.alive() && (t == "" || strings.EqualFold(t, k)) {
+		return run.Input("\r")
 	}
-	if err := run.Input(data); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+	return nil
+}
+
+// pressKey sends one of the allowed named keys to a process.
+func pressKey(run *Run, key string) error {
+	k, ok := keys[key]
+	if !ok {
+		return errors.New("that key is not allowed")
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	return run.Input(k)
+}
+
+// submitCode hands a sign-in code to a waiting `claude auth login`.
+func submitCode(run *Run, code string) error {
+	code = strings.TrimSpace(code)
+	if run.Kind != "login" || !codeRe.MatchString(code) {
+		return errors.New("that does not look like a sign-in code")
+	}
+	return run.Input(code + "\r")
 }

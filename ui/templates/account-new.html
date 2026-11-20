@@ -1,0 +1,11 @@
+{{template "head" .}}
+<a class="backlink" href="/accounts">‹ Accounts</a>
+<h1>Add account</h1>
+<p class="lede">Give this Claude login a short name. Next you will sign in on Anthropic's page.</p>
+<form method="post" action="/accounts" class="stack">
+  <label for="name">Name</label>
+  <input id="name" name="name" placeholder="e.g. overton" pattern="[a-z0-9][a-z0-9\-]{0,31}" required autofocus autocapitalize="none" autocorrect="off" spellcheck="false">
+  <p class="small">Lowercase letters, digits and dashes.</p>
+  <button class="btn primary big">Continue to sign in</button>
+</form>
+{{template "foot" .}}

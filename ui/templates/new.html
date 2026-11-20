@@ -1,0 +1,33 @@
+{{template "head" .}}
+<div class="head">
+  <h1>New instance</h1>
+  <a class="btn" href="/">Cancel</a>
+</div>
+<form method="post" action="/instances">
+  <h2>Account</h2>
+  <div class="chips">
+    {{range .Accounts}}
+    <label class="chip">
+      <input type="radio" name="account" value="{{.ID}}" required{{if .Selected}} checked{{end}}>
+      <span class="led{{if .SignedIn}} on{{end}}"></span>{{.Name}}{{if not .SignedIn}}<small>signed out</small>{{end}}
+    </label>
+    {{else}}
+    <p class="none">No accounts yet. <a class="link" href="/accounts/new">Add one first.</a></p>
+    {{end}}
+  </div>
+
+  <div class="head sub">
+    <h2><label for="q">Folder</label></h2>
+    <a class="link" href="/folders/new">New folder</a>
+  </div>
+  <input id="q" type="search" name="q" placeholder="Filter {{.Total}} folders"
+    hx-get="/new/folders" hx-trigger="input changed delay:120ms, search" hx-target="#folders" hx-swap="outerHTML"
+    hx-include="[name='folder']:checked"
+    autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
+  {{template "folder-list" .}}
+
+  <div class="launchbar">
+    <button class="btn primary big">Launch</button>
+  </div>
+</form>
+{{template "foot" .}}

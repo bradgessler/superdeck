@@ -49,9 +49,12 @@ func resolveProject(root, rel string) (string, error) {
 	return p, nil
 }
 
+// isGitRepo reports whether dir is a main Git checkout. A worktree or
+// submodule has a .git file rather than a .git directory and does not count,
+// so worktrees never show up as projects of their own.
 func isGitRepo(dir string) bool {
-	_, err := os.Lstat(filepath.Join(dir, ".git"))
-	return err == nil
+	st, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil && st.IsDir()
 }
 
 // listProjects returns Git repositories up to three levels below root, as
