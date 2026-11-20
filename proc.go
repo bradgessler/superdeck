@@ -112,12 +112,20 @@ func processAlive(pid int) bool { return pid > 1 && syscall.Kill(pid, 0) == nil 
 // holderAlive reports whether the process with this id is the holder for
 // this socket. The id alone is not trusted: after a reboot it may belong to
 // something else entirely.
+//
+// Only a clear no counts as dead. If it cannot be found out (ps would not
+// run because the Mac is out of processes or file descriptors), the holder is
+// taken to be alive: guessing dead is what gets a healthy Claude signalled.
 func holderAlive(hpid int, sock string) bool {
 	if !processAlive(hpid) {
 		return false
 	}
-	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(hpid)).Output()
-	return err == nil && strings.Contains(string(out), sock)
+	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(hpid)).Output()
+	if err != nil {
+		var ran *exec.ExitError
+		return !errors.As(err, &ran) // ps ran and found nothing: gone
+	}
+	return strings.Contains(string(out), sock)
 }
 
 // parentOf returns the parent process id of pid, or 0.
@@ -152,7 +160,8 @@ type Run struct {
 	mgr      *Manager
 	onExit   func(*Run)
 
-	readMu sync.Mutex // one reader at a time; see read
+	readMu    sync.Mutex // one reader at a time; see read
+	answering sync.Mutex // one answer at a time; see answer
 
 	mu        sync.Mutex
 	slow      int       // polls in a row that got no answer at all
@@ -512,9 +521,11 @@ func (r *Run) unreachable(err error) bool {
 	// Holders started by an older Superdeck do not say who they are; the
 	// process's parent is its holder.
 	if r.hpid == 0 && processAlive(r.pid) {
-		r.hpid = parentOf(r.pid)
+		if r.hpid = parentOf(r.pid); r.hpid == 0 {
+			return true // could not find out who holds it: leave it be
+		}
 	}
-	if holderAlive(r.hpid, r.sock()) {
+	if holderAlive(r.hpid, r.sock()) || someoneHolds(r.sock()) {
 		return true // alive but not answering: leave it be
 	}
 	// Nothing at all is known about it (never reached since Superdeck
@@ -707,15 +718,22 @@ func (m *Manager) Probe(r *Run) (state string, code int) {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	if holderAlive(r.hpid, r.sock()) || m.someoneHolds(r.sock()) {
+	if holderAlive(r.hpid, r.sock()) || someoneHolds(r.sock()) {
 		return "held", 0
 	}
 	return "gone", -1
 }
 
-// someoneHolds reports whether any process is a holder for this socket.
-func (m *Manager) someoneHolds(sock string) bool {
-	return exec.Command("pgrep", "-f", "hold -socket "+sock).Run() == nil
+// someoneHolds reports whether any process is a holder for this socket. Like
+// holderAlive, only a clear no counts: if pgrep could not be run, the answer
+// is yes.
+func someoneHolds(sock string) bool {
+	err := exec.Command("pgrep", "-f", "hold -socket "+regexp.QuoteMeta(sock)).Run()
+	var ran *exec.ExitError
+	if errors.As(err, &ran) {
+		return ran.ExitCode() != 1 // 1 is pgrep saying nothing matched
+	}
+	return true
 }
 
 // Forget removes whatever a finished holder left on disk. It never removes
@@ -725,7 +743,7 @@ func (m *Manager) Forget(id string) {
 	for _, ext := range []string{".exit", ".out", ".exit.tmp", ".out.tmp"} {
 		os.Remove(base + ext)
 	}
-	if !m.someoneHolds(base + ".sock") {
+	if !someoneHolds(base + ".sock") {
 		os.Remove(base + ".sock")
 	}
 }

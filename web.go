@@ -114,7 +114,10 @@ func to(w http.ResponseWriter, r *http.Request, target string) {
 
 // fail returns to a page and shows what went wrong there.
 func (a *App) fail(w http.ResponseWriter, r *http.Request, back string, err error) {
-	msg := err.Error()
+	msg := strings.ToValidUTF8(err.Error(), "")
+	if len(msg) > 280 { // page shows nothing longer than 300
+		msg = strings.ToValidUTF8(msg[:280], "") + "…"
+	}
 	if msg != "" {
 		msg = strings.ToUpper(msg[:1]) + msg[1:] + "."
 	}
@@ -552,8 +555,14 @@ func (a *App) doLaunch(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, back, fmt.Errorf("too many launches in a short time; wait a moment"))
 		return
 	}
-	unlock := a.folderLock(folder)
-	run, err := a.startServer(acct, folder, "", 0, 0)
+	// Lock the folder by its real path, as everything else does.
+	dir, err := resolveProject(a.roots, folder)
+	if err != nil {
+		a.fail(w, r, back, err)
+		return
+	}
+	unlock := a.folderLock(dir)
+	run, err := a.startServer(acct, dir, "", 0, 0)
 	if err == nil {
 		a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	}
@@ -586,6 +595,10 @@ func (a *App) doNewFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		a.fail(w, r, "/folders/new", fmt.Errorf("pick where to create the folder"))
+		return
+	}
+	if !a.allow() {
+		a.fail(w, r, "/folders/new", fmt.Errorf("too many requests in a short time; wait a moment"))
 		return
 	}
 	rel, err := createProject(in, strings.TrimSpace(r.FormValue("name")))
@@ -655,6 +668,10 @@ func (a *App) pageNewAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) doNewAccount(w http.ResponseWriter, r *http.Request) {
+	if !a.allow() {
+		a.fail(w, r, "/accounts/new", fmt.Errorf("too many requests in a short time; wait a moment"))
+		return
+	}
 	id, err := a.addAccount(strings.TrimSpace(r.FormValue("name")))
 	if err != nil {
 		a.fail(w, r, "/accounts/new", err)
@@ -701,6 +718,10 @@ func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
 			to(w, r, "/instances/"+v.ID)
 			return
 		}
+	}
+	if !a.allow() {
+		a.fail(w, r, "/accounts/"+url.PathEscape(r.PathValue("id")), fmt.Errorf("too many requests in a short time; wait a moment"))
+		return
 	}
 	run, err := a.startLogin(r.PathValue("id"))
 	if err != nil {
@@ -811,6 +832,12 @@ func (a *App) doAnswer(w http.ResponseWriter, r *http.Request) {
 	v := r.FormValue("answer")
 	if v != "yes" && v != "no" {
 		a.fail(w, r, back, fmt.Errorf("answer yes or no"))
+		return
+	}
+	// The answer is for the question the page showed. If Claude has moved on
+	// since, show what it is asking now and type nothing.
+	if a.instance(run.View()).Do != r.FormValue("to") {
+		to(w, r, back)
 		return
 	}
 	if err := answer(run, v == "yes"); err != nil {
@@ -943,6 +970,10 @@ func (a *App) doMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cur := a.current(old); cur.alive() && !a.sure(w, r, "Move "+filepath.Base(cur.Project)+" to "+a.accountName(r.FormValue("account"))+"? Any Claude sessions it is hosting will end.", "Move it", "/instances/"+cur.ID+"/move") {
+		return
+	}
+	if !a.allow() {
+		a.fail(w, r, "/instances/"+old.ID+"/move", fmt.Errorf("too many launches in a short time; wait a moment"))
 		return
 	}
 	run, err := a.move(old, r.FormValue("account"))

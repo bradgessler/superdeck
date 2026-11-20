@@ -245,9 +245,13 @@ func (s *Store) SetProven(accountID, folder string) error {
 	return err
 }
 
-// Proven reports whether an instance has ever run properly.
+// Proven reports whether an instance has ever run properly. If the database
+// cannot say, the answer is yes: the caller forgets an instance on a no.
 func (s *Store) Proven(accountID, folder string) bool {
 	var p bool
-	s.db.QueryRow(`SELECT proven FROM instances WHERE account_id = ? AND folder = ?`, accountID, folder).Scan(&p)
+	err := s.db.QueryRow(`SELECT proven FROM instances WHERE account_id = ? AND folder = ?`, accountID, folder).Scan(&p)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
 	return p
 }

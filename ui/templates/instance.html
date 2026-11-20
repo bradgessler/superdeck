@@ -11,14 +11,14 @@
 
 <div class="actions">
   {{if eq .I.Do "trust"}}
-  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Trust this folder</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/answer"><input type="hidden" name="to" value="{{.I.Do}}"><button class="btn big primary" name="answer" value="yes">Trust this folder</button></form>
   <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big">Don't trust it</button></form>
   {{else if eq .I.Do "consent"}}
-  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Turn on Remote Control</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/answer"><input type="hidden" name="to" value="{{.I.Do}}"><button class="btn big primary" name="answer" value="yes">Turn on Remote Control</button></form>
   <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big">Not now</button></form>
   {{else if eq .I.Do "question"}}
-  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Yes</button></form>
-  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big" name="answer" value="no">No</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/answer"><input type="hidden" name="to" value="{{.I.Do}}"><button class="btn big primary" name="answer" value="yes">Yes</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/answer"><input type="hidden" name="to" value="{{.I.Do}}"><button class="btn big" name="answer" value="no">No</button></form>
   {{else if eq .I.Do "open"}}
   <a class="btn big primary" href="{{.I.Link}}" target="_blank" rel="noopener noreferrer">Open in Claude</a>
   {{else if eq .I.Do "signin"}}

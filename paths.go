@@ -177,7 +177,14 @@ func createProject(root, name string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = childEnv("") // the same explicit environment everything else gets
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", errors.New("git init failed: " + strings.TrimSpace(string(out)))
+		// Do not leave the empty folder behind: it would never be listed, and
+		// would block trying the same name again.
+		os.RemoveAll(dir)
+		why, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		if why == "" {
+			why = err.Error()
+		}
+		return "", errors.New("git init failed: " + why)
 	}
 	return dir, nil
 }

@@ -611,13 +611,20 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	if w := do(a, "POST", loc+"/key", url.Values{"key": {"rm -rf"}}, same); !strings.Contains(w.Header().Get("Location"), "error=") {
 		t.Errorf("bad key not refused: %d %q", w.Code, w.Header().Get("Location"))
 	}
+	// An answer from a page that showed some other question types nothing.
+	do(a, "POST", loc+"/answer", url.Values{"answer": {"yes"}, "to": {"consent"}}, same)
 	do(a, "POST", loc+"/answer", url.Values{"answer": {"yes"}}, same)
+	time.Sleep(50 * time.Millisecond)
+	if run.View().Hint != "needs-trust" {
+		t.Fatalf("an answer to a question that was not showing got through: %s", run.View().Hint)
+	}
+	do(a, "POST", loc+"/answer", url.Values{"answer": {"yes"}, "to": {"trust"}}, same)
 	// A question this program has never seen is shown in Claude's own words.
 	waitFor(t, func() bool { return run.View().Hint == "needs-answer" })
 	if q := do(a, "GET", loc, nil, "").Body.String(); !strings.Contains(q, "Share anonymous usage data?") {
 		t.Errorf("unknown question not shown: %s", q)
 	}
-	do(a, "POST", loc+"/answer", url.Values{"answer": {"no"}}, same)
+	do(a, "POST", loc+"/answer", url.Values{"answer": {"no"}, "to": {"question"}}, same)
 	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
 	if !strings.Contains(run.Tail(), "answered=n") {
 		t.Errorf("the no answer did not reach Claude: %q", run.Tail())
@@ -1690,5 +1697,104 @@ func TestLaunchScreenIsOneOrdinaryForm(t *testing.T) {
 	// Filtering as a plain form keeps what was chosen.
 	if !strings.Contains(page, `value="ap"`) || !strings.Contains(page, `value="`+in(a, "app")+`" required checked`) {
 		t.Error("filtering as a plain form lost the filter or the selection")
+	}
+}
+
+// A page for an instance that was stopped must not, once the same account has
+// been launched in the same folder afresh, forget or duplicate the new one.
+func TestStalePageForAStoppedInstanceActsOnItsReplacement(t *testing.T) {
+	a := testApp(t)
+	os.MkdirAll(filepath.Join(a.state, "accounts", "spare"), 0o700)
+	os.WriteFile(filepath.Join(a.state, "accounts", "spare", "in"), nil, 0o600)
+	launch := func() (string, *Run) {
+		loc := do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {in(a, "app")}}, same).Header().Get("Location")
+		r := a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
+		if r == nil {
+			t.Fatalf("launch: %q", loc)
+		}
+		waitFor(t, func() bool { return strings.Contains(r.Tail(), "serving") })
+		return loc, r
+	}
+	oldLoc, old := launch()
+	do(a, "POST", oldLoc+"/stop", url.Values{"sure": {"yes"}}, same)
+	waitFor(t, func() bool { return !old.alive() })
+	_, fresh := launch()
+
+	w := do(a, "POST", oldLoc+"/move", url.Values{"account": {"spare"}, "sure": {"yes"}}, same)
+	moved := a.mgr.Get(strings.TrimPrefix(w.Header().Get("Location"), "/instances/"))
+	if moved == nil || moved.Account != "spare" {
+		t.Fatalf("move from the stale page: %q", w.Header().Get("Location"))
+	}
+	if fresh.alive() {
+		t.Error("the instance launched afresh was left running beside the moved one")
+	}
+	n := 0
+	for _, v := range servers(a) {
+		if !v.Done {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d instances running in one folder, want 1", n)
+	}
+	if want := a.loadWanted(); len(want) != 1 || want[0].Account != "spare" {
+		t.Errorf("remembered: %+v", want)
+	}
+}
+
+func TestAccountCannotTakeTheNameOfAScreen(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.addAccount("new"); err == nil {
+		t.Error(`an account named "new" could never be opened at /accounts/new`)
+	}
+}
+
+// Not being able to find out is not the same as dead.
+func TestHolderIsOnlyDeadOnAClearNo(t *testing.T) {
+	if holderAlive(0, "/x.sock") || holderAlive(os.Getpid(), "/no/such/socket.sock") {
+		t.Error("a missing or mismatched holder was reported alive")
+	}
+	if someoneHolds(filepath.Join(t.TempDir(), "nobody+(here).sock")) {
+		t.Error("someone was said to hold a socket nobody holds")
+	}
+	t.Setenv("PATH", t.TempDir()) // ps and pgrep cannot be run at all
+	if !holderAlive(os.Getpid(), "/no/such/socket.sock") || !someoneHolds("/no/such/socket.sock") {
+		t.Error("a check that could not be made was taken as proof the holder is dead")
+	}
+}
+
+// An instance that proved itself keeps that standing across a Superdeck
+// restart and a move, so a bad start afterwards is retried, not forgotten.
+func TestAdoptedInstanceStillProvesItself(t *testing.T) {
+	minLife = time.Hour // the first Superdeck goes away before it is proven
+	t.Cleanup(func() { minLife = 0 })
+	a := testApp(t)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
+	if a.data().Proven("work", in(a, "app")) {
+		t.Fatal("proven too soon")
+	}
+	a.closing.Store(true)
+	minLife = 0
+	next := newApp(a.roots, a.state, a.claude)
+	t.Cleanup(next.mgr.StopAll)
+	if err := next.adopt(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return next.data().Proven("work", in(a, "app")) })
+}
+
+func TestFailedGitInitLeavesNoFolderBehind(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PATH", t.TempDir()) // no git
+	if _, err := createProject(root, "thing"); err == nil {
+		t.Fatal("expected git init to fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, "thing")); err == nil {
+		t.Error("the empty folder was left behind, blocking a retry")
 	}
 }

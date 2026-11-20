@@ -122,6 +122,9 @@ func (a *App) addAccount(name string) (string, error) {
 	if !accountNameRe.MatchString(name) {
 		return "", errors.New("account names use lowercase letters, digits and dashes")
 	}
+	if name == "new" { // /accounts/new is the screen for adding one
+		return "", errors.New("that name is one Superdeck uses itself; pick another")
+	}
 	if a.nameTaken(name, "") {
 		return "", errors.New("an account already has that name")
 	}
@@ -219,9 +222,27 @@ func (a *App) current(r *Run) *Run {
 	for i := 0; i < 50; i++ {
 		next := a.mgr.Get(r.View().Next)
 		if next == nil {
-			return r
+			break
 		}
 		r = next
+	}
+	return a.liveTwin(r)
+}
+
+// liveTwin covers a run that ended and was not replaced through Superdeck's
+// own chain: someone stopped it and later launched the same account in the
+// same folder afresh. A stale page for the old run then means the new one;
+// acting on the old one's record would forget the instance that is running.
+func (a *App) liveTwin(r *Run) *Run {
+	if r.Kind != "server" || r.alive() {
+		return r
+	}
+	for _, v := range a.mgr.List() {
+		if v.Kind == "server" && !v.Done && v.Account == r.Account && v.Project == r.Project {
+			if live := a.mgr.Get(v.ID); live != nil {
+				return live
+			}
+		}
 	}
 	return r
 }
@@ -271,14 +292,22 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	if err := a.mgr.Start(run, argv, childEnv(cfg), a.exitHook(run)); err != nil {
 		return nil, err
 	}
-	// Once it has lived a while it has proved it works, and from then on it
-	// is retried however often it fails.
-	time.AfterFunc(minLife, func() {
+	a.proveLater(run)
+	return run, nil
+}
+
+// proveLater marks an instance as proven once it has lived a while. From
+// then on it is retried however often it fails.
+func (a *App) proveLater(run *Run) {
+	left := minLife - time.Since(run.Started)
+	if left < 0 {
+		left = 0
+	}
+	time.AfterFunc(left, func() {
 		if run.alive() {
 			a.data().SetProven(run.Account, run.Project)
 		}
 	})
-	return run, nil
 }
 
 // serverExited decides what happens when an instance exits.
@@ -315,7 +344,9 @@ func (a *App) serverExited(r *Run) {
 		return
 	}
 	life := time.Since(r.Started)
-	if life < minLife && !a.data().Proven(r.Account, r.Project) {
+	if life >= minLife {
+		a.data().SetProven(r.Account, r.Project)
+	} else if !a.data().Proven(r.Account, r.Project) {
 		log.Printf("%s failed on its first start; not retrying", r.Name)
 		a.remember(w, false)
 		return
@@ -339,8 +370,8 @@ func (a *App) scheduleRestart(r *Run, n int, delay time.Duration) {
 func (a *App) restart(r *Run, n int) {
 	defer func() {
 		if p := recover(); p != nil {
-			log.Printf("%s: restart panicked: %v", r.Name, p)
-			r.setRestart(time.Time{})
+			log.Printf("%s: restart panicked: %v; trying again in %s", r.Name, p, backoff(n+1))
+			a.scheduleRestart(r, n+1, backoff(n+1))
 		}
 	}()
 	unlock := a.folderLock(r.Project)
@@ -364,7 +395,11 @@ func (a *App) restart(r *Run, n int) {
 // trying if it cannot be started yet: a folder on a disk that is not mounted,
 // say. Used when Superdeck starts and when an account is signed in.
 func (a *App) bringBack(w wanted, n int) {
-	defer func() { recover() }()
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("bringing back %s panicked: %v", w.Project, p)
+		}
+	}()
 	if a.closing.Load() || !a.isWanted(w.Account, w.Project) {
 		return
 	}
@@ -496,6 +531,9 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 	if err := a.stopAndWait(old); err != nil {
 		return nil, err
 	}
+	// It keeps its standing: an instance that had proved itself is retried
+	// under the new account too, not dropped if its first start there fails.
+	proven := a.data().Proven(old.Account, old.Project)
 	a.remember(wanted{Account: old.Account, Project: old.Project}, false)
 	run, err := a.startServer(to, old.Project, old.spawn, old.capacity, 0)
 	if err != nil {
@@ -512,6 +550,9 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 		return nil, fmt.Errorf("could not start it under %s (%w), so it is running under %s again", a.accountName(to), err, a.accountName(old.Account))
 	}
 	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	if proven {
+		a.data().SetProven(run.Account, run.Project)
+	}
 	old.setNext(run.ID)
 	return run, nil
 }
@@ -544,6 +585,12 @@ func (a *App) startUpdate() (*Run, error) {
 // a single keypress and some want Enter after it, so Enter is sent only if the
 // question is still the last thing on the screen a moment later.
 func answer(run *Run, yes bool) error {
+	// A second tap while the first is still being typed is dropped, so a
+	// double tap cannot send two letters.
+	if !run.answering.TryLock() {
+		return nil
+	}
+	defer run.answering.Unlock()
 	k := "n"
 	if yes {
 		k = "y"
@@ -640,8 +687,17 @@ func (a *App) adopt() error {
 		switch state, code := a.mgr.Probe(r); state {
 		case "held":
 			a.mgr.Adopt(r, a.exitHook(r))
-			if r.Kind == "login" {
+			switch r.Kind {
+			case "login":
 				a.expire(r)
+			case "server":
+				a.proveLater(r)
+				// Superdeck went down in the middle of relaunching or
+				// moving it: marked to stop, never stopped, still wanted.
+				if r.wasStopped() && a.isWanted(r.Account, r.Project) {
+					r.unstop()
+					a.data().ClearStopped(r.ID)
+				}
 			}
 			log.Printf("still running: %s", r.Name)
 		default: // it ended, or vanished, while Superdeck was away

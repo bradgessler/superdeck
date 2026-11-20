@@ -37,6 +37,9 @@ Superdeck's safety is that it can only run a short list of commands. Keep it tha
 - A question is only a question while it is the last line on the screen, and its kind is read from that line alone: an answered question can still be visible above.
 - Launched instances are remembered in the `instances` table. Entries go through the same validation as a fresh launch, including that the folder is one Superdeck lists.
 
+- **Only a clear no counts as dead.** A check that could not be made (`ps` or `pgrep` would not run, a database read failed) is never read as "the holder is gone" or "this instance never worked". Each such check fails towards leaving the process and its record alone (`holderAlive`, `someoneHolds`, `Store.Proven`).
+- **A page may be stale.** Stop, Move, Relaunch and answers act on the instance as it is now (`current`, which also finds a fresh launch of the same account and folder), and an answer is typed only if the page showed the question Claude is asking now.
+
 ## Data and migrations
 
 - Superdeck's own data is one SQLite file, `superdeck.db`, through `store.go`. Claude's data stays in each account's config directory; never store credentials.

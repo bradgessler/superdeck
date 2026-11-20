@@ -112,7 +112,7 @@ Be clear about what that means. **Anyone who can reach the page can take control
 
 What the restrictions below do buy is that reaching the page gives no shortcut around Claude: there is no way to run an arbitrary command, read a file, or type free text into a process through Superdeck.
 
-- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell.
+- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude auth logout`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell. For its own housekeeping it also runs itself (`superdeck hold`, the process that keeps one Claude alive) and `ps` and `pgrep` to check on those.
 - **No typing into Claude.** The page cannot send text to a process. It can answer yes or no, or press one of nine named keys (Enter, y, n, 1, 2, 3, Up, Down, Esc). The one exception is a sign-in, which accepts a single code made of letters, digits and `_.~#+/=-`.
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
 - **Listed folders only.** An instance can be launched only in a folder Superdeck lists: a Git repository, or a folder holding repositories, at or inside a folder you named on the command line, after symlinks are resolved. Hidden folders and the insides of repositories are not offered.
@@ -122,7 +122,7 @@ What the restrictions below do buy is that reaching the page gives no shortcut a
 - **No shortcuts around Claude's safeguards.** It never passes `--dangerously-skip-permissions` or a permission-mode override, and never edits Claude's config to pre-trust a folder. It never reads or stores Claude credentials.
 - **A record.** Every state-changing request is written to the log with its address and the network address it came from. It does not record what was typed.
 - **Private files.** Its database, log and sockets are readable only by you.
-- **Limits.** At most 16 instances, 3 sign-ins in progress and 12 accounts, and launches are rate limited.
+- **Limits.** At most 16 instances, 3 sign-ins in progress and 12 accounts, and anything that starts a process (launching, moving, signing in, creating a folder) is rate limited.
 - **Asking first.** Stopping, moving, relaunching and removing an account all ask for confirmation, with or without htmx.
 
 Not built: sign-in, TLS.
