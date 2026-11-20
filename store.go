@@ -194,7 +194,7 @@ func (s *Store) EndRun(id string, code int) error {
 
 // LiveRuns returns the processes that had not exited when Superdeck last knew.
 func (s *Store) LiveRuns() ([]*Run, error) {
-	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped, hpid
+	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped, hpid, pid
 		FROM runs WHERE ended_at IS NULL ORDER BY started_at`)
 	if err != nil {
 		return nil, err
@@ -204,7 +204,7 @@ func (s *Store) LiveRuns() ([]*Run, error) {
 	for rows.Next() {
 		r := &Run{}
 		var started string
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Account, &r.Project, &r.dir, &r.Name, &r.spawn, &r.capacity, &r.Version, &r.Restarts, &started, &r.stopped, &r.hpid); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Account, &r.Project, &r.dir, &r.Name, &r.spawn, &r.capacity, &r.Version, &r.Restarts, &started, &r.stopped, &r.hpid, &r.pid); err != nil {
 			return nil, err
 		}
 		r.Started, _ = time.Parse(time.RFC3339, started)
@@ -228,8 +228,8 @@ func (s *Store) RemoveAccount(id string) error {
 }
 
 // SetHolder records the process id of the holder keeping a run alive.
-func (s *Store) SetHolder(id string, hpid int) error {
-	_, err := s.db.Exec(`UPDATE runs SET hpid = ? WHERE id = ?`, hpid, id)
+func (s *Store) SetHolder(id string, hpid, pid int) error {
+	_, err := s.db.Exec(`UPDATE runs SET hpid = ?, pid = ? WHERE id = ?`, hpid, pid, id)
 	return err
 }
 
@@ -254,4 +254,11 @@ func (s *Store) Proven(accountID, folder string) bool {
 		return true
 	}
 	return p
+}
+
+// Alive runs the smallest possible query. It is for the health check, which
+// cares whether the database answers at all, not what it says.
+func (s *Store) Alive() error {
+	var n int
+	return s.db.QueryRow(`SELECT 1`).Scan(&n)
 }

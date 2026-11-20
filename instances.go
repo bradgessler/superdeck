@@ -684,6 +684,35 @@ func (a *App) adopt() error {
 	known := map[string]bool{}
 	for _, r := range runs {
 		known[r.ID] = true
+		a.adoptOne(r)
+	}
+	// A holder with no record cannot be supervised or shown. Ask it to stop
+	// rather than let it run unseen beside whatever is launched in its place.
+	// Its socket is only removed once nothing is holding it.
+	for _, id := range a.mgr.Leftovers() {
+		if known[id] {
+			continue
+		}
+		if holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop") == nil {
+			log.Printf("stopped a process Superdeck had no record of (%s)", id)
+		}
+		a.mgr.Forget(id)
+	}
+	a.data().Prune()
+	return nil
+}
+
+// adoptOne picks up one recorded process. Whatever is wrong with one record
+// must not keep Superdeck from starting: a Superdeck that cannot start cannot
+// be reached to put anything right. A record that cannot be dealt with is
+// left as it is, with its process untouched.
+func (a *App) adoptOne(r *Run) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("could not pick up %s (%s): %v; leaving it alone", r.Name, r.ID, p)
+		}
+	}()
+	{
 		switch state, code := a.mgr.Probe(r); state {
 		case "held":
 			a.mgr.Adopt(r, a.exitHook(r))
@@ -705,20 +734,6 @@ func (a *App) adopt() error {
 			a.mgr.Forget(r.ID)
 		}
 	}
-	// A holder with no record cannot be supervised or shown. Ask it to stop
-	// rather than let it run unseen beside whatever is launched in its place.
-	// Its socket is only removed once nothing is holding it.
-	for _, id := range a.mgr.Leftovers() {
-		if known[id] {
-			continue
-		}
-		if holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop") == nil {
-			log.Printf("stopped a process Superdeck had no record of (%s)", id)
-		}
-		a.mgr.Forget(id)
-	}
-	a.data().Prune()
-	return nil
 }
 
 // removeAccount signs an account out with Anthropic's own command, then

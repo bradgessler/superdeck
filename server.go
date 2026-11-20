@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,9 @@ type App struct {
 	roots         []string // real paths of the folders Claude may be launched in
 	state, claude string
 	hosts         map[string]bool
+	port          string          // the port being listened on
+	anyAddr       bool            // listening on every interface
+	selfNames     map[string]bool // this Mac's own names
 	mgr           *Manager
 
 	statusMu sync.Mutex
@@ -81,7 +85,7 @@ func newApp(roots []string, state, claude string) *App {
 	a.mgr.onStart = func(r *Run) error { return a.data().SaveRun(r) }
 	a.mgr.onStop = func(r *Run) { a.data().MarkStopped(r.ID) }
 	a.mgr.onEnd = func(r *Run) { a.data().EndRun(r.ID, r.View().ExitCode) }
-	a.mgr.onHolder = func(id string, hpid int) { a.data().SetHolder(id, hpid) }
+	a.mgr.onHolder = func(id string, hpid, pid int) { a.data().SetHolder(id, hpid, pid) }
 	return a
 }
 
@@ -203,6 +207,7 @@ func main() {
 	for _, f := range []string{"superdeck.log", "holders.log"} {
 		os.Chmod(filepath.Join(a.state, f), 0o600)
 	}
+	go a.watchdog(*addr)
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -215,11 +220,19 @@ func (a *App) allowHosts(addr, extra string) error {
 	if err != nil {
 		return err
 	}
+	a.port = port
 	ip := net.ParseIP(host)
 	switch {
 	case host == "" || (ip != nil && ip.IsUnspecified()):
 		if extra == "" {
 			return errors.New("listening on every interface needs -hosts with the names you will browse to")
+		}
+		a.anyAddr = true
+		a.selfNames = map[string]bool{"localhost": true}
+		if name, err := os.Hostname(); err == nil && name != "" {
+			name = strings.ToLower(strings.TrimSuffix(name, "."))
+			a.selfNames[name] = true
+			a.selfNames[strings.TrimSuffix(name, ".local")+".local"] = true
 		}
 	case ip != nil && ip.IsLoopback():
 		a.hosts[net.JoinHostPort("localhost", port)] = true
@@ -228,11 +241,98 @@ func (a *App) allowHosts(addr, extra string) error {
 		a.hosts[addr] = true
 	}
 	for _, h := range strings.Split(extra, ",") {
-		if h = strings.TrimSpace(h); h != "" {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			a.hosts[h] = true
 		}
 	}
 	return nil
+}
+
+// hostOK reports whether a request's Host header is one this server answers
+// to. The names given at startup always are. When listening on every
+// interface, so are any numeric address and this Mac's own name, on the right
+// port: the Mac's address on the network can change (a new DHCP lease, a
+// different network), and the page must not refuse its owner over that while
+// they are away. Neither opens the door the list exists to close. DNS
+// rebinding works by pointing a name the attacker owns at this Mac; a numeric
+// address, or the Mac's own name, is not a name an attacker controls.
+func (a *App) hostOK(h string) bool {
+	h = strings.ToLower(h)
+	if a.hosts[h] {
+		return true
+	}
+	if !a.anyAddr {
+		return false
+	}
+	host, port, err := net.SplitHostPort(h)
+	if err != nil || port != a.port {
+		return false
+	}
+	return net.ParseIP(host) != nil || a.selfNames[host]
+}
+
+// watchdog restarts Superdeck if it stops answering. launchd brings back a
+// Superdeck that crashed, but cannot see one that is running and stuck, and
+// a stuck one cannot be fixed from a phone. Restarting is safe by design:
+// instances are kept alive by their holders and picked up again.
+//
+// It asks for a page the way a browser would, over the network socket, so it
+// covers the listener, the request guard and the locks every page needs. It
+// takes several failures in a row, over a couple of minutes, to act.
+func (a *App) watchdog(addr string) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	at := net.JoinHostPort(host, port)
+	client := &http.Client{Timeout: watchdogTimeout, Transport: &http.Transport{DisableKeepAlives: true}}
+	fails := 0
+	for {
+		time.Sleep(watchdogEvery)
+		if a.closing.Load() {
+			return
+		}
+		resp, err := client.Get("http://" + at + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				fails = 0
+				continue
+			}
+			err = fmt.Errorf("status %d", resp.StatusCode)
+		}
+		if a.closing.Load() {
+			return
+		}
+		fails++
+		log.Printf("health check failed (%d of %d): %v", fails, watchdogFails, err)
+		if fails >= watchdogFails {
+			log.Print("superdeck has stopped answering; restarting it. Instances keep running. What it was doing:")
+			pprof.Lookup("goroutine").WriteTo(log.Writer(), 1)
+			watchdogExit()
+			return
+		}
+	}
+}
+
+var (
+	watchdogEvery   = 30 * time.Second
+	watchdogTimeout = 15 * time.Second
+	watchdogFails   = 4
+	watchdogExit    = func() { os.Exit(3) }
+)
+
+// health answers the watchdog. It touches what every page touches, so that
+// if those are stuck, so is this. A database error is not a failure here:
+// restarting does not mend a full disk, and would take the page away too.
+func (a *App) health(w http.ResponseWriter, r *http.Request) {
+	a.mgr.List()
+	a.data().Alive()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte("ok\n"))
 }
 
 // guard applies a Host allow-list and a same-origin check on every
@@ -240,13 +340,13 @@ func (a *App) allowHosts(addr, extra string) error {
 // through your browser. There is no sign-in yet.
 func (a *App) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !a.hosts[r.Host] {
+		if !a.hostOK(r.Host) {
 			http.Error(w, "unknown host", http.StatusForbidden)
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			u, err := url.Parse(r.Header.Get("Origin"))
-			if err != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
+			if err != nil || !strings.EqualFold(u.Host, r.Host) || (u.Scheme != "http" && u.Scheme != "https") {
 				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}

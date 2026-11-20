@@ -49,6 +49,7 @@ go build -o superdeck . && ./superdeck ~/Projects
 ```
 
 - Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
+- `chaos_test.go` puts two instances through forty random failures (Claude killed, holder killed or frozen, socket deleted, Superdeck replaced) and checks each is running exactly once afterwards. Run it several times after touching `hold.go`, `proc.go` or the restart rules: `go test -race -count=10 -run RandomFailures ./...`. Add a case when you find a new way for things to fail.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
 - Look at a changed screen in a browser at phone width and desktop width before calling it done. Anything you tap gets tried in iOS Safari (the simulator will do): touch behaves differently from a narrow desktop window.
 - Restarting Superdeck does not touch instances: their holders keep them alive. Killing a holder (`superdeck hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.

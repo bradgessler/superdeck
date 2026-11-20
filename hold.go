@@ -78,6 +78,7 @@ type holder struct {
 	buf     []byte
 	seq     int64
 	alive   bool
+	reaped  bool // the process has exited and been collected; its id may now belong to something else
 	code    int
 	cmd     *exec.Cmd
 	tty     *os.File
@@ -159,7 +160,11 @@ func holdMain(args []string) (status int) {
 	exited := make(chan int, 1)
 	go func() {
 		code := 0
-		if err := h.cmd.Wait(); err != nil {
+		err := h.cmd.Wait()
+		h.mu.Lock()
+		h.reaped = true
+		h.mu.Unlock()
+		if err != nil {
 			code = -1
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
@@ -215,20 +220,24 @@ func (h *holder) write(b []byte) {
 
 // finish records how the process ended: its output and exit code are written
 // beside the socket before the holder goes away. The output is written first,
-// so an exit record always has its output with it.
+// so an exit record always has its output with it. Only once both are on disk
+// does the holder say the process has ended: Superdeck clears the files away
+// when it hears that, and must not do so before they exist.
 func (h *holder) finish(sock string, code int) {
 	h.mu.Lock()
-	h.alive, h.code = false, code
 	out := append([]byte(nil), h.buf...)
-	for s := range h.streams {
-		delete(h.streams, s)
-		close(s.q)
-	}
 	h.mu.Unlock()
 	base := strings.TrimSuffix(sock, ".sock")
 	writeFileAtomic(base+".out", out)
 	b, _ := json.Marshal(holdExit{Code: code})
 	writeFileAtomic(base+".exit", b)
+	h.mu.Lock()
+	h.alive, h.code = false, code
+	for s := range h.streams {
+		delete(h.streams, s)
+		close(s.q)
+	}
+	h.mu.Unlock()
 }
 
 func writeFileAtomic(path string, b []byte) {
@@ -241,22 +250,28 @@ func writeFileAtomic(path string, b []byte) {
 // stop asks the process group to exit and kills it if it lingers. The holder
 // does the waiting itself, so a stop completes even if Superdeck goes away.
 func (h *holder) stop() {
-	h.mu.Lock()
-	alive := h.alive
-	h.mu.Unlock()
-	if !alive || h.cmd == nil || h.cmd.Process == nil {
+	if h.cmd == nil || h.cmd.Process == nil {
 		return
 	}
 	pid := h.cmd.Process.Pid
-	syscall.Kill(-pid, syscall.SIGTERM)
+	// The signal is sent with the lock held and only while the process has
+	// not been collected, so it can never land on something else that was
+	// given the same id afterwards.
+	send := func(sig syscall.Signal) bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if !h.alive || h.reaped {
+			return false
+		}
+		syscall.Kill(-pid, sig)
+		return true
+	}
+	if !send(syscall.SIGTERM) {
+		return
+	}
 	go func() {
 		time.Sleep(5 * time.Second)
-		h.mu.Lock()
-		still := h.alive
-		h.mu.Unlock()
-		if still {
-			syscall.Kill(-pid, syscall.SIGKILL)
-		}
+		send(syscall.SIGKILL)
 	}()
 }
 

@@ -128,6 +128,16 @@ func holderAlive(hpid int, sock string) bool {
 	return strings.Contains(string(out), sock)
 }
 
+// commandHas reports whether the process with this id was started with a
+// command line containing text. If that cannot be found out, the answer is no.
+func commandHas(pid int, text string) bool {
+	if text == "" || !processAlive(pid) {
+		return false
+	}
+	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && strings.Contains(string(out), text)
+}
+
 // parentOf returns the parent process id of pid, or 0.
 func parentOf(pid int) int {
 	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
@@ -465,12 +475,13 @@ func (r *Run) read() bool {
 	}
 	r.fails, r.slow, r.orphan = 0, 0, time.Time{}
 	r.feed(data, rep.Reset)
+	changed := (rep.Hpid > 0 && rep.Hpid != r.hpid) || (rep.Pid > 0 && rep.Pid != r.pid)
 	r.seq, r.pid = rep.Seq, rep.Pid
-	if rep.Hpid > 0 && rep.Hpid != r.hpid {
+	if rep.Hpid > 0 {
 		r.hpid = rep.Hpid
-		if r.mgr.onHolder != nil {
-			go r.mgr.onHolder(r.ID, rep.Hpid)
-		}
+	}
+	if changed && r.mgr.onHolder != nil {
+		go r.mgr.onHolder(r.ID, r.hpid, r.pid)
 	}
 	r.text = r.screenText()
 	r.urls = strings.NewReplacer("\r\n", "\n", "\r", "").Replace(escRe.ReplaceAllString(string(r.raw), ""))
@@ -675,7 +686,7 @@ func (r *Run) render() (out template.HTML) {
 // Manager owns every Run. It only ever starts the fixed command shapes built
 // in instances.go; no request can hand it a command.
 type Manager struct {
-	onHolder func(id string, hpid int) // record which process is holding a run
+	onHolder func(id string, hpid, pid int) // record which processes a run is
 
 	self    string           // this program, re-run as `superdeck hold`
 	dir     string           // where holders keep their sockets
@@ -904,6 +915,12 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 // Adopt takes over a run that was started before Superdeck restarted and is
 // still held.
 func (m *Manager) Adopt(r *Run, onExit func(*Run)) {
+	// The process id came from the record. Since it was written the Mac may
+	// have restarted and given that id to something unrelated, so it is
+	// believed only if that process is recognisably this run.
+	if r.pid > 0 && !commandHas(r.pid, r.Name) {
+		r.pid = 0
+	}
 	m.mu.Lock()
 	r.mgr, r.onExit = m, onExit
 	m.runs[r.ID] = r

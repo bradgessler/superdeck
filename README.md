@@ -59,7 +59,7 @@ To reach it from a phone on your LAN or home VPN, listen on the Mac's LAN addres
 | Flag | Meaning |
 |---|---|
 | `-addr` | Address to listen on. Default `127.0.0.1:7433`. |
-| `-hosts` | Extra host names the browser may use to reach it, comma separated. Needed when listening on every interface (`0.0.0.0`). |
+| `-hosts` | Extra host names the browser may use to reach it, comma separated. Needed when listening on every interface (`0.0.0.0`). Numeric addresses and the Mac's own name are accepted without being listed, so a change of address does not lock you out. |
 | `-state` | Where Superdeck keeps its data. Default `~/.superdeck`. |
 | `-claude` | Path to the `claude` binary. Default: found on `PATH`. |
 | `-launch-agent` | Print a launchd agent for these settings and exit. |
@@ -117,7 +117,7 @@ What the restrictions below do buy is that reaching the page gives no shortcut a
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
 - **Listed folders only.** An instance can be launched only in a folder Superdeck lists: a Git repository, or a folder holding repositories, at or inside a folder you named on the command line, after symlinks are resolved. Hidden folders and the insides of repositories are not offered.
 - **Escaped output.** Everything a process prints is HTML-escaped before it is shown. The sign-in button only ever points at an Anthropic address.
-- **No cross-site driving.** Every request must carry an expected `Host` header and every state-changing request must be same-origin, so a web page elsewhere cannot drive Superdeck through your browser. Browsers that say where a request came from are refused when it came from another site.
+- **No cross-site driving.** Every request must carry an expected `Host` header (a name you listed, a numeric address, or the Mac's own name; never a name someone else could point at your Mac) and every state-changing request must be same-origin, so a web page elsewhere cannot drive Superdeck through your browser. Browsers that say where a request came from are refused when it came from another site.
 - **Clean environment.** Child processes get an explicit environment. The launcher's own `CLAUDE_*` and `ANTHROPIC_*` variables are not passed on.
 - **No shortcuts around Claude's safeguards.** It never passes `--dangerously-skip-permissions` or a permission-mode override, and never edits Claude's config to pre-trust a folder. It never reads or stores Claude credentials.
 - **A record.** Every state-changing request is written to the log with its address and the network address it came from. It does not record what was typed.
@@ -152,8 +152,12 @@ Go dependencies: [creack/pty](https://github.com/creack/pty) for pseudo-terminal
 | Failure | What Superdeck does |
 |---|---|
 | Superdeck crashes, is killed or is upgraded | launchd restarts it. Holders and Claude are not touched; Superdeck finds them again and carries on. |
+| Superdeck is running but has stopped answering | It checks itself every 30 seconds by asking for a page the way a browser would. After four failures in a row it writes what it was doing to the log and exits, and launchd starts a fresh one. Instances are not touched. |
+| The Mac's address on the network changes | The page keeps working at the new address. When listening on every interface, Superdeck answers to any numeric address and to the Mac's own name, on its port. |
 | A Claude instance dies on its own | Restarted after 5 seconds, doubling up to every 5 minutes, for as long as it takes. An instance you launched is only ever forgotten by you. The home screen shows it as restarting, and you can tell it not to. |
-| A holder dies | Claude dies with it. Superdeck notices after a few seconds, makes sure nothing was left behind, and restarts the instance. |
+| A holder dies | Claude dies with it. Superdeck notices after a few seconds, makes sure nothing was left behind, and restarts the instance. It records each Claude process id, so this holds even if Superdeck itself was restarted in between. |
+| Superdeck cannot tell whether a holder is alive | It assumes it is. Only a clear "no such process" counts as dead; a check that could not be made never gets a Claude signalled or replaced. |
+| One saved record cannot be read at startup | That one is left alone and logged. Superdeck still starts, so the page is there to put it right. |
 | A holder is slow, frozen or cut off from its socket | Nothing is signalled, ever, while the holder process is alive. The instance shows "not responding" and recovers by itself if the holder answers again. You can still stop it. |
 | The Mac reboots | The instances are gone. Superdeck relaunches the ones you had launched, and keeps trying any that cannot start yet (a disk not mounted, no network). With FileVault on, nothing runs until someone unlocks the Mac in person. |
 | An instance that has never once run properly fails | Left stopped and marked failed, with the last thing Claude printed, and forgotten. Once an instance has run for 30 seconds it counts as working and is retried from then on. |

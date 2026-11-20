@@ -41,6 +41,7 @@ func (a *App) routes() http.Handler {
 	}
 	mux.HandleFunc("/", notFound) // anything else gets the page with a way back
 
+	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /{$}", a.pageHome)
 	mux.HandleFunc("GET /instances", a.partInstances)
 	mux.HandleFunc("GET /new", a.pageNew)
