@@ -1,0 +1,45 @@
+{{template "head" .}}
+<a class="backlink" href="/accounts/{{.I.AccountID}}">‹ {{.I.Account}}</a>
+<div class="signin">
+{{if .I.Live}}
+  <h1>Sign in to {{.I.Account}}</h1>
+  {{if .I.URL}}
+  <p class="lede">Sign in on Anthropic's page, then paste the code it gives you.</p>
+  <a class="btn big open" href="{{.I.URL}}" target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a>
+  <form method="post" action="/instances/{{.I.ID}}/code">
+    <label for="code">Code</label>
+    <input id="code" name="code" required autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
+    <button class="btn big finish">Finish signing in</button>
+  </form>
+  <div hx-get="/instances/{{.I.ID}}/watch?url=1" hx-trigger="every 2s" hx-swap="none"></div>
+  {{else}}
+  <p class="lede">Getting a sign-in link from Claude…</p>
+  {{if .I.Notice}}
+  <p class="lede">This is taking longer than it should. Here is what Claude has said so far.</p>
+  <pre class="screen">{{.Screen}}</pre>
+  {{end}}
+  <div hx-get="/instances/{{.I.ID}}/watch?url=0" hx-trigger="every 1s" hx-swap="none"></div>
+  {{end}}
+  <form method="post" action="/instances/{{.I.ID}}/stop" class="cancel"><button>Cancel</button></form>
+
+{{else if .I.Failed}}
+  <h1>That didn't work</h1>
+  <p class="lede">Claude didn't accept the sign-in. A code works once and expires quickly, so start again to get a fresh one.</p>
+  <form method="post" action="/accounts/{{.I.AccountID}}/signin"><button class="btn big primary">Try again</button></form>
+  <details class="said">
+    <summary>What Claude said</summary>
+    <pre class="screen">{{.Screen}}</pre>
+  </details>
+
+{{else if eq .I.State "cancelled"}}
+  <h1>Sign-in cancelled</h1>
+  <p class="lede">Nothing changed for {{.I.Account}}.</p>
+  <form method="post" action="/accounts/{{.I.AccountID}}/signin"><button class="btn big primary">Start again</button></form>
+
+{{else}}
+  <h1>{{.I.Account}} is signed in</h1>
+  <p class="lede">You can launch instances under this account now.</p>
+  <a class="btn big primary" href="/accounts/{{.I.AccountID}}">Done</a>
+{{end}}
+</div>
+{{template "foot" .}}

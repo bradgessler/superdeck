@@ -37,6 +37,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /instances/{id}", a.pageInstance)
 	mux.HandleFunc("GET /instances/{id}/live", a.partLive)
 	mux.HandleFunc("GET /instances/{id}/screen", a.partScreen)
+	mux.HandleFunc("GET /instances/{id}/watch", a.watch)
 	mux.HandleFunc("POST /instances/{id}/answer", a.doAnswer)
 	mux.HandleFunc("POST /instances/{id}/key", a.doKey)
 	mux.HandleFunc("POST /instances/{id}/code", a.doCode)
@@ -483,6 +484,10 @@ func (a *App) pageInstance(w http.ResponseWriter, r *http.Request) {
 		d["Nav"] = "accounts"
 	}
 	d["I"], d["Screen"] = iv, run.Screen()
+	if iv.IsLogin {
+		render(w, "signin.html", d)
+		return
+	}
 	render(w, "instance.html", d)
 }
 
@@ -497,6 +502,25 @@ func (a *App) partLive(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("HX-Refresh", "true")
 	}
 	render(w, "instance-live", map[string]any{"I": iv})
+}
+
+// watch lets a page that is otherwise still notice that something changed.
+// It answers with nothing until the sign-in link appears or the process ends,
+// then tells the browser where to go. The page itself is never redrawn
+// underneath you while you are typing.
+func (a *App) watch(w http.ResponseWriter, r *http.Request) {
+	run := a.run(w, r)
+	if run == nil {
+		return
+	}
+	v := run.View()
+	switch {
+	case v.Done && v.Kind == "login" && v.ExitCode == 0 && !v.Stopped:
+		w.Header().Set("HX-Redirect", "/accounts/"+url.PathEscape(v.Account))
+	case v.Done, v.URL != "" && r.URL.Query().Get("url") == "0":
+		w.Header().Set("HX-Refresh", "true")
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) partScreen(w http.ResponseWriter, r *http.Request) {
@@ -552,8 +576,13 @@ func (a *App) doCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Give Claude a moment to finish the sign-in before showing the result.
-	for deadline := time.Now().Add(6 * time.Second); run.alive() && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(8 * time.Second); run.alive() && time.Now().Before(deadline); {
 		time.Sleep(100 * time.Millisecond)
+	}
+	if v := run.View(); v.Done && v.ExitCode == 0 {
+		a.refreshStatus(run.Account)
+		to(w, r, "/accounts/"+url.PathEscape(run.Account))
+		return
 	}
 	to(w, r, back)
 }
@@ -571,7 +600,7 @@ func (a *App) doStop(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if run.Kind == "login" {
-		to(w, r, "/accounts")
+		to(w, r, "/accounts/"+url.PathEscape(run.Account))
 		return
 	}
 	to(w, r, "/")

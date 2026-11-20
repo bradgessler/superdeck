@@ -102,22 +102,6 @@
   </div>
   {{end}}
 
-  {{if and .I.IsLogin (not .I.Live)}}
-  <div class="ask-buttons after">
-    {{if .I.Failed}}<form method="post" action="/accounts/{{.I.AccountID}}/signin"><button class="btn primary">Try again</button></form>{{end}}
-    <a class="btn" href="/accounts/{{.I.AccountID}}">Back to {{.I.Account}}</a>
-  </div>
-  {{end}}
-
-  {{if and .I.IsLogin .I.Live}}
-    {{if .I.URL}}
-    <ol class="steps">
-      <li><a class="btn primary" href="{{.I.URL}}" target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a></li>
-      <li>Sign in there, then paste the code it gives you below.</li>
-    </ol>
-    {{else}}<p class="meta">Starting the sign-in…</p>{{end}}
-  {{end}}
-
   {{if and .I.IsServer .I.Live (not .I.Ask)}}
   <p class="lede">Open the Claude app, go to Code, and start a session on this instance.</p>
   {{end}}

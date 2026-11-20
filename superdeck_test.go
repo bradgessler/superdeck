@@ -630,3 +630,40 @@ func TestRenameFromTheAccountScreen(t *testing.T) {
 		t.Errorf("bad name: %q", w.Header().Get("Location"))
 	}
 }
+
+func TestSignInScreens(t *testing.T) {
+	a := testApp(t)
+	w := do(a, "POST", "/accounts/idle/signin", url.Values{}, same)
+	loc := w.Header().Get("Location")
+	run := a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
+	waitFor(t, func() bool { return run.View().URL != "" })
+	page := do(a, "GET", loc, nil, "").Body.String()
+	for _, want := range []string{"Sign in to idle", `href="https://claude.example/oauth?state=abc"`, `name="code"`, "Cancel"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("sign-in screen is missing %q", want)
+		}
+	}
+	// While you are typing, the watcher says nothing and redraws nothing.
+	if w := do(a, "GET", loc+"/watch?url=1", nil, ""); w.Code != 204 || w.Header().Get("HX-Refresh") != "" || w.Header().Get("HX-Redirect") != "" {
+		t.Errorf("watcher interrupted a waiting sign-in: %v", w.Header())
+	}
+	// A wrong code lands on a clear failure with a way to retry.
+	do(a, "POST", loc+"/code", url.Values{"code": {"wrong-code"}}, same)
+	waitFor(t, func() bool { return !run.alive() })
+	page = do(a, "GET", loc, nil, "").Body.String()
+	if !strings.Contains(page, "That didn") || !strings.Contains(page, "Try again") {
+		t.Errorf("failure screen: %s", page)
+	}
+	// The right code goes straight to the account, now signed in.
+	w = do(a, "POST", "/accounts/idle/signin", url.Values{}, same)
+	loc = w.Header().Get("Location")
+	run = a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
+	waitFor(t, func() bool { return run.View().URL != "" })
+	w = do(a, "POST", loc+"/code", url.Values{"code": {"good-code"}}, same)
+	if got := w.Header().Get("Location"); got != "/accounts/idle" {
+		t.Fatalf("after a good code: %q", got)
+	}
+	if page := do(a, "GET", "/accounts/idle", nil, "").Body.String(); !strings.Contains(page, "signed in") || !strings.Contains(page, "t@example.com") {
+		t.Errorf("account not shown as signed in: %s", page)
+	}
+}

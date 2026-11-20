@@ -1,14 +1,6 @@
 {{template "head" .}}
-<a class="backlink" href="{{if .I.IsLogin}}/accounts/{{.I.AccountID}}{{else}}/{{end}}">‹ {{if .I.IsLogin}}{{.I.Account}}{{else}}Instances{{end}}</a>
+<a class="backlink" href="/">‹ Instances</a>
 {{template "instance-live" .}}
-
-{{if and .I.IsLogin .I.Live}}
-<form method="post" action="/instances/{{.I.ID}}/code" class="stack code">
-  <label for="code">Sign-in code</label>
-  <input id="code" name="code" required autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-  <button class="btn primary big">Finish sign-in</button>
-</form>
-{{end}}
 
 {{if .I.Live}}
 <form method="post" action="/instances/{{.I.ID}}/stop" hx-post="/instances/{{.I.ID}}/stop"{{if .I.IsServer}} hx-confirm="Stop this instance? Any Claude sessions it is hosting will end."{{end}} class="stopform">

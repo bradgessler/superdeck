@@ -206,3 +206,21 @@ input:focus { border-color: var(--amber); outline: none; }
 .rename button { display: none; }
 .rename:focus-within button { display: inline-block; }
 @media (min-width: 760px) { .rename input { font-size: 36px; } }
+
+/* ---- sign-in: one column, one thing emphasised at a time ---- */
+.signin { max-width: 400px; }
+.signin h1 { margin-top: 6px; }
+.signin .lede { margin: 12px 0 28px; max-width: none; }
+.signin form { display: grid; gap: 10px; }
+.signin .open { margin-bottom: 28px; background: var(--amber); color: var(--amber-ink); font-weight: 800; }
+.signin label { font: 600 12px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); }
+.signin #code { font: 17px/1.3 var(--mono); padding: 15px 14px; }
+.signin .finish { margin-top: 2px; }
+/* once a code is in the box, the emphasis moves from "open" to "finish" */
+.signin:has(#code:valid) .open { background: var(--raised); color: var(--text); font-weight: 650; }
+.signin:has(#code:valid) .finish { background: var(--amber); color: var(--amber-ink); font-weight: 800; }
+.signin .cancel { margin-top: 22px; }
+.signin .cancel button { width: 100%; padding: 12px; color: var(--muted); font-weight: 600; border-radius: var(--r); }
+.signin .cancel button:hover { color: var(--text); }
+.signin .said { margin-top: 30px; }
+.signin .said summary { cursor: pointer; color: var(--muted); font-weight: 600; }
