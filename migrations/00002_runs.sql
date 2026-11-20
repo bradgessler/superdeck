@@ -1,7 +1,7 @@
 -- +goose Up
--- A run is one Claude process Superdeck started. Each lives in its own tmux
--- session, named by its id, so it keeps going while Superdeck restarts. The
--- row is how a restarted Superdeck knows what each session is.
+-- A run is one Claude process Superdeck started. Each is kept alive
+-- independently of Superdeck, so it keeps going while Superdeck restarts.
+-- The row is how a restarted Superdeck knows what each one is.
 CREATE TABLE runs (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL,

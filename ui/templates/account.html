@@ -2,15 +2,19 @@
 <a class="backlink" href="/accounts">‹ Accounts</a>
 <form method="post" action="/accounts/{{.A.ID}}/rename" class="rename">
   <input name="name" value="{{.A.Name}}" aria-label="Account name" pattern="[a-z0-9][a-z0-9\-]{0,31}" required autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-  <button class="btn primary">Save</button>
+  <button class="btn">Save</button>
 </form>
-<p class="status"><span class="led{{if .A.Pending}} wait{{else if .A.SignedIn}} on{{end}}"></span><b class="{{if .A.Pending}}wait{{else if .A.SignedIn}}on{{end}}">{{if .A.Pending}}signing in{{else if .A.SignedIn}}signed in{{else}}signed out{{end}}</b></p>
+<p class="status"><span class="led{{if .A.Pending}} wait{{else if .A.SignedIn}} on{{end}}"></span><b{{if .A.Pending}} class="wait"{{else if .A.SignedIn}} class="on"{{end}}>{{if .A.Pending}}signing in{{else if .A.SignedIn}}signed in{{else if .A.Checking}}checking{{else}}signed out{{end}}</b></p>
 {{if .A.Email}}<p class="meta">{{.A.Email}}</p>{{end}}
 {{if .A.Org}}<p class="meta">{{.A.Org}}</p>{{end}}
+{{if .A.Same}}<p class="lede">This is the same Claude login as {{.A.Same}}. To use a different one, sign in again and choose the other account on Anthropic's page; a private browser window stops it reusing the login you already have open.</p>{{end}}
 
 <div class="actions">
-  {{if .A.Pending}}<a class="btn primary big" href="/instances/{{.A.Pending}}">Continue signing in</a>
+  {{if .A.Pending}}<a class="btn big primary" href="/instances/{{.A.Pending}}">Continue signing in</a>
   {{else}}<form method="post" action="/accounts/{{.A.ID}}/signin"><button class="btn big{{if not .A.SignedIn}} primary{{end}}">{{if .A.SignedIn}}Sign in again{{else}}Sign in{{end}}</button></form>{{end}}
+  <form method="post" action="/accounts/{{.A.ID}}/remove" hx-post="/accounts/{{.A.ID}}/remove" hx-confirm="Remove {{.A.Name}}? It will be signed out on this Mac and its settings deleted.">
+    <button class="btn big risky">Remove account</button>
+  </form>
 </div>
 
 {{if .Running}}

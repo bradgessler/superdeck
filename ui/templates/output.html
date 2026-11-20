@@ -1,7 +1,7 @@
 {{template "head" .}}
 <a class="backlink" href="/instances/{{.I.ID}}">‹ {{.I.Title}}</a>
 <h1>Terminal</h1>
-<p class="meta">{{if .I.Live}}Live. This is what Claude is showing right now.{{else}}This is what Claude showed before it exited.{{end}}</p>
+<p class="lede">{{if .I.Live}}What Claude is showing right now.{{else}}What Claude showed before it exited.{{end}}</p>
 <pre class="screen"{{if .I.Live}} hx-get="/instances/{{.I.ID}}/screen" hx-trigger="every 1s"{{end}}>{{.Screen}}</pre>
 {{if .I.Live}}
 <form method="post" action="/instances/{{.I.ID}}/key" hx-post="/instances/{{.I.ID}}/key" hx-swap="none" class="keys" aria-label="Press a key">

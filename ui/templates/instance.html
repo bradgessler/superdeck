@@ -1,16 +1,48 @@
 {{template "head" .}}
 <a class="backlink" href="/">‹ Instances</a>
-{{template "instance-live" .}}
+<h1>{{.I.Title}}</h1>
+<p class="status"><span class="led{{if .I.Cls}} {{.I.Cls}}{{end}}{{if and .I.Live (eq .I.Cls "on")}} live{{end}}"></span><b{{if .I.Cls}} class="{{.I.Cls}}"{{end}}>{{.I.State}}</b></p>
+{{if .I.Lede}}<p class="lede">{{.I.Lede}}</p>{{end}}
+{{if .I.Question}}<p class="said">{{.I.Question}}</p>{{end}}
+{{if .I.Detail}}<p class="said">{{.I.Detail}}</p>{{end}}
+{{if .I.Outdated}}<p class="lede">Claude Code {{.I.Installed}} is installed. This instance is still running {{.I.Version}}; relaunch it to update.</p>{{end}}
+<p class="meta">{{.I.Meta}}</p>
+{{if .I.Path}}<p class="meta">{{.I.Path}}</p>{{end}}
 
 <div class="actions">
-  {{if .I.Live}}
-  <form method="post" action="/instances/{{.I.ID}}/stop" hx-post="/instances/{{.I.ID}}/stop"{{if .I.IsServer}} hx-confirm="Stop this instance? Any Claude sessions it is hosting will end."{{end}}>
-    <button class="btn big stop">{{if .I.IsServer}}Stop instance{{else}}Cancel{{end}}</button>
-  </form>
-  {{else if .I.IsServer}}
+  {{if eq .I.Do "trust"}}
+  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Trust this folder</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big">Don't trust it</button></form>
+  {{else if eq .I.Do "consent"}}
+  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Turn on Remote Control</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big">Not now</button></form>
+  {{else if eq .I.Do "question"}}
+  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big primary" name="answer" value="yes">Yes</button></form>
+  <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn big" name="answer" value="no">No</button></form>
+  {{else if eq .I.Do "open"}}
+  <a class="btn big primary" href="{{.I.Link}}" target="_blank" rel="noopener noreferrer">Open in Claude</a>
+  {{else if eq .I.Do "signin"}}
+  <a class="btn big primary" href="/accounts/{{.I.AccountID}}">Sign in to {{.I.Account}}</a>
+  {{else if eq .I.Do "next"}}
+  <a class="btn big primary" href="/instances/{{.I.Next}}">Go to the running instance</a>
+  {{else if eq .I.Do "again"}}
   <form method="post" action="/instances/{{.I.ID}}/relaunch"><button class="btn big primary">Launch again</button></form>
+  {{else if eq .I.Do "done"}}
+  <a class="btn big primary" href="/">Back to instances</a>
   {{end}}
-  {{if .I.IsServer}}<a class="btn big" href="/instances/{{.I.ID}}/move">Move to another account</a>{{end}}
+
+  {{if and .I.Outdated .I.Live}}
+  <form method="post" action="/instances/{{.I.ID}}/relaunch" hx-post="/instances/{{.I.ID}}/relaunch" hx-confirm="Relaunch this instance? Any Claude sessions it is hosting will end.">
+    <button class="btn big">Relaunch to update</button>
+  </form>
+  {{end}}
+  {{if and .I.IsServer (not .I.Next) (not .I.Restarting)}}<a class="btn big" href="/instances/{{.I.ID}}/move">Move to another account</a>{{end}}
   <a class="btn big" href="/instances/{{.I.ID}}/output">Terminal</a>
+  {{if and .I.Live (ne .I.Do "trust") (ne .I.Do "consent")}}
+  <form method="post" action="/instances/{{.I.ID}}/stop" hx-post="/instances/{{.I.ID}}/stop"{{if .I.IsServer}} hx-confirm="Stop this instance? Any Claude sessions it is hosting will end."{{end}}>
+    <button class="btn big risky">{{if .I.IsServer}}Stop instance{{else}}Cancel{{end}}</button>
+  </form>
+  {{end}}
 </div>
+{{if or .I.Live .I.Restarting}}<div hx-get="/instances/{{.I.ID}}/watch?sig={{.I.Sig}}" hx-trigger="every 1s" hx-swap="none"></div>{{end}}
 {{template "foot" .}}

@@ -11,7 +11,7 @@ These came from the person who owns this project. Treat them as requirements.
 1. **Render on the server.** Go templates produce every screen. The browser runs as little as possible. See the `superdeck-browser-code` skill before adding any script.
 2. **One job per screen, and less on it.** See the `superdeck-ui` skill before touching templates or CSS.
 3. **Drive Claude on the server; show purpose-built controls.** Do not show a raw terminal where a button or a sentence will do. The terminal has its own screen for when it is needed.
-4. **Restrict what can be run, not who can reach it.** There is no sign-in. Superdeck is meant to be reachable only on a private network. Its safety comes from running a short fixed list of commands with arguments it builds itself. Do not add authentication unless asked. Do add validation.
+4. **Restrict what can be run, not who can reach it.** There is no sign-in, by the owner's choice. Superdeck is meant to be reachable only on a private network. It runs a short fixed list of commands with arguments it builds itself. Do not add authentication unless asked. Do add validation. Be honest in the docs about the limit of this: whoever can reach the page can sign in their own Claude account and drive Claude on the Mac.
 5. **Use Anthropic's binary as it is.** Never pass `--dangerously-skip-permissions` or a permission-mode override, never edit Claude's config to pre-trust a folder, never read, copy or store Claude credentials. Sign-in happens on Anthropic's page.
 6. **Survive failure.** Anything that can crash should be supervised or contained. See "What happens when things go wrong" in the README and keep it true.
 7. **Few dependencies, well-known ones.** Prefer the standard library, then a battle-tested package.
@@ -29,7 +29,8 @@ These came from the person who owns this project. Treat them as requirements.
 | `server.go` | `main`, flags, the request guard, account status |
 | `web.go` | routes, page handlers, view models |
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
-| `proc.go` | one supervised process held in tmux: reading its screen, sending keys, prompt detection |
+| `hold.go` | the holder: a detached copy of this binary that keeps one Claude process alive, and `superdeck attach` |
+| `proc.go` | Superdeck's side of a held process: polling it, emulating its terminal, prompt detection |
 | `paths.go` | allowed folders, folder listing, path confinement |
 | `store.go` | the SQLite store and migration runner |
 | `migrations/` | numbered SQL schema changes, compiled into the binary |
@@ -50,7 +51,8 @@ go build -o superdeck . && ./superdeck ~/Projects
 - Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
 - Look at a changed screen in a browser at phone width and desktop width before calling it done.
-- Restarting Superdeck does not touch instances: tmux holds them. Stopping the private tmux server (`tmux -S ~/.superdeck/tmux.sock kill-server`) does end them all, so do not do that on a copy someone is using.
+- Restarting Superdeck does not touch instances: their holders keep them alive. Killing a holder (`superdeck hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.
+- **Never run crash tests against someone's real instances.** Build a separate copy with its own `-state`, port and the stand-in CLI. A real session was lost this way once.
 - Never trust a folder or accept a consent prompt on the owner's behalf while testing against real Claude. Stop at the prompt.
 - Do not put real email addresses, host names or home-directory paths in the repository. Use the stand-in for screenshots.
 

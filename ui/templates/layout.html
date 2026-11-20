@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
+<body{{if .Wide}} class="wide"{{end}}>
 <header class="top">
   <a class="mark" href="/">super<b>deck</b></a>
   <nav>
@@ -18,7 +18,7 @@
   </nav>
 </header>
 <main>
-{{if .Error}}<p class="notice bad" role="alert">{{.Error}}</p>{{end}}
+{{if .Error}}<p class="notice" role="alert">{{.Error}}</p>{{end}}
 {{end}}
 
 {{define "foot"}}
@@ -29,12 +29,12 @@
 
 {{define "instance-row"}}
 <a href="/instances/{{.ID}}"{{if .Dim}} class="dim"{{end}}>
-  <span class="led {{.Cls}}{{if and .Live (eq .Cls "on")}} live{{end}}"></span>
+  <span class="led{{if .Cls}} {{.Cls}}{{end}}{{if and .Live (eq .Cls "on")}} live{{end}}"></span>
   <span class="row-body">
     <span class="row-title">{{.Title}}</span>
     <span class="row-sub">{{.Sub}}</span>
   </span>
-  <span class="row-state {{.Cls}}">{{.State}}</span>
+  <span class="row-state{{if .Cls}} {{.Cls}}{{end}}">{{.State}}</span>
 </a>
 {{end}}
 
@@ -43,7 +43,7 @@
   {{range .Live}}{{template "instance-row" .}}{{else}}
   <div class="empty"><b>Nothing is running.</b>Launch an instance and it will show up here and in the Claude app.</div>
   {{end}}
-  {{if .Past}}<div class="divider">Recently stopped</div>{{range .Past}}{{template "instance-row" .}}{{end}}{{end}}
+  {{if .Past}}<div class="divider">Recent</div>{{range .Past}}{{template "instance-row" .}}{{end}}{{end}}
 </div>
 {{end}}
 
@@ -51,7 +51,7 @@
 <div id="folders" class="rows picker">
   {{range .Folders}}
   <label>
-    <input type="radio" name="folder" value="{{.Rel}}" required{{if .Selected}} checked{{end}}>
+    <input type="radio" name="folder" value="{{.Rel}}" form="launch" required{{if .Selected}} checked{{end}}>
     <span class="row-body"><span class="row-title">{{.Name}}</span><span class="row-sub">{{if .Note}}{{.Note}}{{else}}{{.Parent}}{{end}}</span></span>
     <span class="tick" aria-hidden="true">✓</span>
   </label>
@@ -59,65 +59,5 @@
   <div class="empty">{{if .Total}}Nothing matches.{{else}}No folders with Git repositories found in {{.Root}}.{{end}}</div>
   {{end}}
   {{if gt .More 0}}<div class="empty">{{.More}} more. Type to find one.</div>{{end}}
-</div>
-{{end}}
-
-{{define "instance-live"}}
-<div id="live"{{if .I.Live}} hx-get="/instances/{{.I.ID}}/live" hx-trigger="every 1s" hx-swap="outerHTML"{{end}}>
-  <h1>{{.I.Title}}</h1>
-  <p class="status"><span class="led {{.I.Cls}}{{if and .I.Live (eq .I.Cls "on")}} live{{end}}"></span><b class="{{.I.Cls}}">{{.I.State}}</b></p>
-  <p class="meta">{{.I.Meta}}</p>
-  {{if .I.Path}}<p class="meta">{{.I.Path}}</p>{{end}}
-
-  {{if .I.Notice}}<p class="notice">{{.I.Notice}}</p>{{end}}
-
-  {{if eq .I.Ask "trust"}}
-  <div class="ask">
-    <p><b>Trust this folder?</b> Claude is asking before it works in {{.I.Path}}. Only trust folders whose contents you know.</p>
-    <div class="ask-buttons">
-      <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn primary" name="answer" value="yes">Trust it</button></form>
-      <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn">Don't trust, stop</button></form>
-    </div>
-  </div>
-  {{end}}
-
-  {{if eq .I.Ask "consent"}}
-  <div class="ask">
-    <p><b>Turn on Remote Control for {{.I.Account}}?</b> Claude asks this once per account. It lets the Claude app reach instances on this Mac.</p>
-    <div class="ask-buttons">
-      <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn primary" name="answer" value="yes">Turn it on</button></form>
-      <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn">No, stop</button></form>
-    </div>
-  </div>
-  {{end}}
-
-  {{if eq .I.Ask "question"}}
-  <div class="ask">
-    <p><b>Claude is asking a question.</b></p>
-    <pre class="question">{{.I.Question}}</pre>
-    <div class="ask-buttons">
-      <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn primary" name="answer" value="yes">Yes</button></form>
-      <form method="post" action="/instances/{{.I.ID}}/answer"><button class="btn" name="answer" value="no">No</button></form>
-    </div>
-  </div>
-  {{end}}
-
-  {{if and .I.IsServer .I.Live (not .I.Ask)}}
-    {{if .I.Link}}
-    <p class="lede">Connected. Start a session here from the Claude app, under Code.</p>
-    <a class="btn big primary open-claude" href="{{.I.Link}}" target="_blank" rel="noopener noreferrer">Open in Claude</a>
-    {{else}}
-    <p class="lede">Connecting to Claude…</p>
-    {{end}}
-  {{end}}
-
-  {{if .I.Outdated}}
-  <div class="ask calm">
-    <p>Claude Code {{.I.Installed}} is installed. This instance is still running {{.I.Version}}.</p>
-    <div class="ask-buttons">
-      <form method="post" action="/instances/{{.I.ID}}/relaunch" hx-post="/instances/{{.I.ID}}/relaunch" hx-confirm="Relaunch this instance? Any Claude sessions it is hosting will end."><button class="btn">Relaunch to update</button></form>
-    </div>
-  </div>
-  {{end}}
 </div>
 {{end}}

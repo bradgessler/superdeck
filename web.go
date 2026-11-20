@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -38,7 +40,6 @@ func (a *App) routes() http.Handler {
 
 	mux.HandleFunc("GET /instances/{id}", a.pageInstance)
 	mux.HandleFunc("GET /instances/{id}/output", a.pageOutput)
-	mux.HandleFunc("GET /instances/{id}/live", a.partLive)
 	mux.HandleFunc("GET /instances/{id}/screen", a.partScreen)
 	mux.HandleFunc("GET /instances/{id}/watch", a.watch)
 	mux.HandleFunc("POST /instances/{id}/answer", a.doAnswer)
@@ -126,6 +127,7 @@ type accountView struct {
 	ID, Name, Who string
 	Email, Org    string
 	SignedIn      bool
+	Same          string // another account signed in as the same Claude user
 	Checking      bool   // sign-in state not known yet
 	Pending       string // id of a sign-in in progress
 	Selected      bool
@@ -161,21 +163,28 @@ func (a *App) accountViews(selected string) []accountView {
 
 type instanceView struct {
 	ID, Kind, Title, Account, AccountID, Sub, Meta, Path string
-	Question                                             string
-	State, Cls                                           string
-	Live, Dim, IsServer, IsLogin                         bool
-	Ask                                                  string // "trust", "consent" or ""
-	Notice                                               string
-	URL, Link                                            string
-	Outdated                                             bool
-	Installed, Version                                   string
-	Failed                                               bool
+
+	State, Cls string // one status word and its colour
+	Live, Dim  bool
+	IsServer   bool
+	IsLogin    bool
+
+	// What the screen says and offers. Lede is one sentence about what is
+	// happening; Detail is a line of Claude's own output when that explains
+	// it; Do names the single emphasised action, if there is one.
+	Lede, Detail, Question string
+	Do                     string // trust, consent, question, open, signin, next, again, done
+	URL, Link, Next        string
+	Outdated               bool
+	Installed, Version     string
+	Failed, Restarting     bool
+	Sig                    string // changes whenever the screen should be redrawn
 }
 
 func (a *App) instance(v RunView) instanceView {
 	name := a.accountName(v.Account)
 	iv := instanceView{ID: v.ID, Kind: v.Kind, Account: name, AccountID: v.Account, Live: !v.Done, Dim: v.Done,
-		IsServer: v.Kind == "server", IsLogin: v.Kind == "login", URL: v.URL, Link: v.Link, Version: v.Version}
+		IsServer: v.Kind == "server", IsLogin: v.Kind == "login", URL: v.URL, Link: v.Link, Version: v.Version, Next: v.Next}
 	switch {
 	case iv.IsServer:
 		iv.Title = filepath.Base(v.Project)
@@ -185,42 +194,79 @@ func (a *App) instance(v RunView) instanceView {
 	default:
 		iv.Title = v.Name
 	}
+	lastLine := lastLines(v.Tail(), 1)
 	switch {
+	// ---- waiting on a person ----
 	case v.Hint == "needs-trust" && !v.Done:
-		iv.State, iv.Cls, iv.Ask = "needs you", "wait", "trust"
+		iv.State, iv.Cls, iv.Do = "needs you", "wait", "trust"
+		iv.Lede = "Claude is asking whether to trust this folder before it works here. Only trust folders whose contents you know."
 	case v.Hint == "needs-consent" && !v.Done:
-		iv.State, iv.Cls, iv.Ask = "needs you", "wait", "consent"
+		iv.State, iv.Cls, iv.Do = "needs you", "wait", "consent"
+		iv.Lede = "Claude is asking to turn on Remote Control for " + name + ". It asks once per account, and it is what lets the Claude app reach instances on this Mac."
 	case v.Hint == "needs-answer":
-		iv.State, iv.Cls, iv.Ask, iv.Question = "needs you", "wait", "question", v.Question
-	case v.Hint == "needs-trust":
-		iv.State, iv.Cls = "not trusted", "wait"
-		iv.Notice = "Claude would not start here because this folder has not been trusted yet."
-	case v.Hint == "needs-login":
-		iv.State, iv.Cls = "signed out", "wait"
-		iv.Notice = name + " is signed out. Sign it in under Accounts, then launch again."
+		iv.State, iv.Cls, iv.Do, iv.Question = "needs you", "wait", "question", v.Question
+		iv.Lede = "Claude is asking a question."
+
+	// ---- running ----
 	case !v.Done && iv.IsLogin:
 		iv.State, iv.Cls = "waiting for you", "wait"
 		if v.URL == "" && time.Since(v.Started) > 15*time.Second {
-			iv.Notice = "Claude has not produced a sign-in link yet. Look at the output below, or cancel and try again."
+			iv.Lede = "slow"
 		}
+	case !v.Done && iv.IsServer && v.Link != "":
+		iv.State, iv.Cls, iv.Do = "running", "on", "open"
+		iv.Lede = "Connected. Start a session here from the Claude app, under Code."
+	case !v.Done && iv.IsServer:
+		iv.State, iv.Cls = "starting", "on"
+		iv.Lede = "Connecting to Claude…"
+		if time.Since(v.Started) > time.Minute {
+			iv.Lede = "Still connecting to Claude. This usually takes a few seconds; the terminal shows what it is doing."
+		}
+	case !v.Done:
+		iv.State, iv.Cls = "working", "on"
+		iv.Lede = "Checking for a newer Claude Code…"
+
+	// ---- ended, and something comes next ----
+	case v.Next != "":
+		iv.State, iv.Do = "replaced", "next"
+		iv.Lede = "This one ended and was started again."
+	case !v.RestartAt.IsZero():
+		iv.State, iv.Cls, iv.Restarting = "restarting", "wait", true
+		iv.Lede = "It stopped unexpectedly. Superdeck is starting it again."
+
+	// ---- ended ----
+	case v.Hint == "needs-trust":
+		iv.State, iv.Do = "not trusted", "again"
+		iv.Lede = "Claude did not start because this folder has not been trusted."
+	case v.Hint == "needs-login":
+		iv.State, iv.Cls, iv.Do = "signed out", "wait", "signin"
+		iv.Lede = name + " is signed out, so Claude could not start. Sign it in, then launch again."
 	case iv.IsLogin && v.Stopped:
 		iv.State = "cancelled"
 	case iv.IsLogin && v.ExitCode == 0:
 		iv.State, iv.Cls = "signed in", "on"
 	case iv.IsLogin:
-		iv.State, iv.Cls, iv.Failed = "sign-in failed", "bad", true
-		iv.Notice = "Claude did not accept that sign-in. Codes expire quickly and work once; start again to get a fresh one."
-	case !v.Done && iv.IsServer:
-		iv.State, iv.Cls = "running", "on"
-	case !v.Done:
-		iv.State, iv.Cls = "working", "on"
-	case v.Stopped || v.ExitCode == 0:
-		iv.State = "finished"
-		if iv.IsServer {
-			iv.State = "stopped"
+		iv.State, iv.Cls, iv.Failed = "failed", "bad", true
+	case iv.IsServer && v.Stopped:
+		iv.State, iv.Do = "stopped", "again"
+		iv.Lede = "This instance was stopped."
+	case iv.IsServer && v.ExitCode == 0:
+		iv.State, iv.Do = "stopped", "again"
+		iv.Lede = "Claude exited."
+	case iv.IsServer:
+		iv.State, iv.Cls, iv.Failed, iv.Do = "failed", "bad", true, "again"
+		iv.Lede = "Claude stopped with an error and was not started again."
+		iv.Detail = lastLine
+	case v.ExitCode == 0: // an update check
+		iv.State, iv.Do = "finished", "done"
+		iv.Lede = lastLine
+		if iv.Lede == "" {
+			iv.Lede = "Done."
 		}
 	default:
-		iv.State, iv.Cls, iv.Failed = "failed", "bad", true
+		iv.State, iv.Cls, iv.Failed, iv.Do = "failed", "bad", true, "done"
+		iv.Lede = "The update check did not finish."
+		iv.Detail = lastLine
 	}
 	sub := []string{}
 	if iv.IsServer {
@@ -240,6 +286,11 @@ func (a *App) instance(v RunView) instanceView {
 		meta = append(meta, "Claude Code "+v.Version)
 	}
 	iv.Meta = strings.Join(meta, " · ")
+	// Everything that changes what the screen shows or offers. The relative
+	// time is left out on purpose: the screen is not redrawn just for that.
+	sum := sha256.Sum256([]byte(strings.Join([]string{iv.State, iv.Do, iv.Lede, iv.Detail, iv.Question,
+		iv.URL, iv.Link, iv.Next, fmt.Sprint(iv.Outdated, iv.Live, v.Restarts)}, "\x00")))
+	iv.Sig = hex.EncodeToString(sum[:8])
 	return iv
 }
 
@@ -265,9 +316,9 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 		// there and always starts at the same place.
 		v := folderView{Rel: f.Path, Name: filepath.Base(f.Path), Parent: tilde(filepath.Dir(f.Path)), Selected: f.Path == selected}
 		if f.Repos == 1 {
-			v.Note = v.Parent + " · holds 1 repo"
+			v.Note = v.Parent + " · 1 repository inside"
 		} else if f.Repos > 1 {
-			v.Note = fmt.Sprintf("%s · holds %d repos", v.Parent, f.Repos)
+			v.Note = fmt.Sprintf("%s · %d repositories inside", v.Parent, f.Repos)
 		}
 		return v
 	}
@@ -309,12 +360,15 @@ func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
 
 // ---- Instances ----
 
+// instanceLists splits instances into what is running, or about to be again,
+// and what recently ended. A run that was replaced by a newer one is left
+// out: the newer one is the instance.
 func (a *App) instanceLists() (live, past []instanceView) {
 	for _, v := range a.mgr.List() {
-		if v.Kind != "server" {
+		if v.Kind != "server" || v.Next != "" {
 			continue
 		}
-		if !v.Done {
+		if !v.Done || !v.RestartAt.IsZero() {
 			live = append(live, a.instance(v))
 		} else if len(past) < 5 {
 			past = append(past, a.instance(v))
@@ -347,22 +401,23 @@ func (a *App) pageNew(w http.ResponseWriter, r *http.Request) {
 	if selected == "" {
 		selected = cookie(r, "sd_folder")
 	}
-	acct := cookie(r, "sd_account")
-	views := a.accountViews(acct)
-	picked := false
-	for _, v := range views {
-		picked = picked || v.Selected
+	views := a.accountViews(cookie(r, "sd_account"))
+	// Only a signed-in account can be chosen. Pick the remembered one if it
+	// still is, otherwise the first that is.
+	picked, usable := false, false
+	for i := range views {
+		usable = usable || views[i].SignedIn
+		views[i].Selected = views[i].Selected && views[i].SignedIn
+		picked = picked || views[i].Selected
 	}
-	if !picked {
-		for i := range views {
-			if views[i].SignedIn || i == len(views)-1 {
-				views[i].Selected = true
-				break
-			}
+	for i := range views {
+		if !picked && views[i].SignedIn {
+			views[i].Selected, picked = true, true
 		}
 	}
-	d["Accounts"] = views
-	d["Folders"], d["More"], d["Total"] = a.folders("", selected)
+	q := r.URL.Query().Get("q") // so the filter also works as a plain form
+	d["Accounts"], d["Usable"], d["Q"] = views, usable, q
+	d["Folders"], d["More"], d["Total"] = a.folders(q, selected)
 	d["Root"] = a.rootNames()
 	render(w, "new.html", d)
 }
@@ -436,16 +491,32 @@ func (a *App) doNewFolder(w http.ResponseWriter, r *http.Request) {
 
 // ---- Accounts ----
 
+// sameLogin notes accounts that are signed in as the same Claude user, which
+// is easy to do by accident and defeats the point of having two.
+func sameLogin(views []accountView) {
+	for i := range views {
+		for j := range views {
+			if i != j && views[i].Email != "" && views[i].Email == views[j].Email {
+				views[i].Same = views[j].Name
+			}
+		}
+	}
+}
+
 func (a *App) pageAccounts(w http.ResponseWriter, r *http.Request) {
 	d := page(r, "Accounts", "accounts")
-	d["Accounts"] = a.accountViews("")
+	views := a.accountViews("")
+	sameLogin(views)
+	d["Accounts"] = views
 	render(w, "accounts.html", d)
 }
 
 // pageAccount is one account: who it is signed in as and what you can do.
 func (a *App) pageAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	for _, v := range a.accountViews("") {
+	views := a.accountViews("")
+	sameLogin(views)
+	for _, v := range views {
 		if v.ID != id {
 			continue
 		}
@@ -461,7 +532,7 @@ func (a *App) pageAccount(w http.ResponseWriter, r *http.Request) {
 		render(w, "account.html", d)
 		return
 	}
-	http.NotFound(w, r)
+	notFound(w, r)
 }
 
 func (a *App) pageNewAccount(w http.ResponseWriter, r *http.Request) {
@@ -518,10 +589,18 @@ func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
 
 // ---- One instance ----
 
+// notFound is a proper page, with a way back, for an address that is no
+// longer anything: an instance from before a restart, a removed account.
+func notFound(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	pages.ExecuteTemplate(w, "notfound.html", page(r, "Not found", ""))
+}
+
 func (a *App) run(w http.ResponseWriter, r *http.Request) *Run {
 	run := a.mgr.Get(r.PathValue("id"))
 	if run == nil {
-		http.NotFound(w, r)
+		notFound(w, r)
 	}
 	return run
 }
@@ -538,7 +617,7 @@ func (a *App) pageOutput(w http.ResponseWriter, r *http.Request) {
 	if iv.IsLogin {
 		d["Nav"] = "accounts"
 	}
-	d["I"], d["Screen"] = iv, run.Screen()
+	d["I"], d["Screen"], d["Wide"] = iv, run.Screen(), true
 	render(w, "output.html", d)
 }
 
@@ -560,23 +639,11 @@ func (a *App) pageInstance(w http.ResponseWriter, r *http.Request) {
 	render(w, "instance.html", d)
 }
 
-func (a *App) partLive(w http.ResponseWriter, r *http.Request) {
-	run := a.run(w, r)
-	if run == nil {
-		return
-	}
-	iv := a.instance(run.View())
-	if !iv.Live {
-		// The process ended: reload once so the whole page settles.
-		w.Header().Set("HX-Refresh", "true")
-	}
-	render(w, "instance-live", map[string]any{"I": iv})
-}
-
 // watch lets a page that is otherwise still notice that something changed.
-// It answers with nothing until the sign-in link appears or the process ends,
-// then tells the browser where to go. The page itself is never redrawn
-// underneath you while you are typing.
+// The page sends the signature of what it is showing; while that still
+// matches, the answer is empty and nothing is redrawn, so nothing moves under
+// a finger or a cursor. When it no longer matches, the browser is told to
+// load the page afresh, or to go where the outcome is.
 func (a *App) watch(w http.ResponseWriter, r *http.Request) {
 	run := a.run(w, r)
 	if run == nil {
@@ -586,7 +653,7 @@ func (a *App) watch(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case v.Done && v.Kind == "login" && v.ExitCode == 0 && !v.Stopped:
 		w.Header().Set("HX-Redirect", "/accounts/"+url.PathEscape(v.Account))
-	case v.Done, v.URL != "" && r.URL.Query().Get("url") == "0":
+	case a.instance(v).Sig != r.URL.Query().Get("sig"):
 		w.Header().Set("HX-Refresh", "true")
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -594,6 +661,11 @@ func (a *App) watch(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) partScreen(w http.ResponseWriter, r *http.Request) {
 	if run := a.run(w, r); run != nil {
+		if !run.alive() {
+			// The page was showing a live terminal; reload it once so it
+			// stops polling and says the process has ended.
+			w.Header().Set("HX-Refresh", "true")
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(run.Screen()))
 	}
@@ -693,6 +765,10 @@ func (a *App) doRelaunch(w http.ResponseWriter, r *http.Request) {
 func (a *App) pageMove(w http.ResponseWriter, r *http.Request) {
 	run := a.run(w, r)
 	if run == nil {
+		return
+	}
+	if run.Kind != "server" {
+		notFound(w, r)
 		return
 	}
 	iv := a.instance(run.View())

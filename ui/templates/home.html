@@ -1,12 +1,12 @@
 {{template "head" .}}
-<div class="head">
-  <h1>Instances</h1>
-  <a class="btn primary" href="/new">New instance</a>
-</div>
+<h1>Instances</h1>
 {{template "instance-list" .}}
-<div class="foot">
-  {{if .Claude}}<span>Claude Code {{.Claude}}</span>{{end}}
-  {{if .Updating}}<a class="link" href="/instances/{{.Updating}}">Update in progress</a>
-  {{else}}<form method="post" action="/update"><button class="link">Check for updates</button></form>{{end}}
+<div class="actions">
+  <a class="btn big primary" href="/new">New instance</a>
 </div>
+<form method="post" action="/update" class="foot">
+  {{if .Claude}}<span>Claude Code {{.Claude}}</span>{{end}}
+  {{if .Updating}}<a href="/instances/{{.Updating}}">Checking for updates…</a>
+  {{else}}<button>Check for updates</button>{{end}}
+</form>
 {{template "foot" .}}

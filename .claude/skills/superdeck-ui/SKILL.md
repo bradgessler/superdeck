@@ -20,11 +20,14 @@ The owner's standard is high fit and finish with less on the screen. Earlier ver
 ## Layout
 
 - **One column.** Title, a status line, one or two lines of detail, then actions.
-- **Actions are full-width buttons stacked in a column** (`.actions`). Do not mix button widths or float buttons beside text.
-- **One emphasised thing at a time.** Only the next step is amber. If the next step changes (for example once a code has been typed), move the emphasis with CSS rather than showing two amber buttons.
+- **Actions are full-width buttons stacked in a column** (`.actions`), below the content. Do not mix button widths, put buttons side by side, or float a button beside a title. The order is: the one emphasised action, then neutral ones, then the risky one last.
+- **One emphasised thing at a time.** Only the next step is solid amber. If the next step changes (for example once a code has been typed), move the emphasis with CSS rather than showing two amber buttons. A *choice* (the selected account or folder) is not an action: show it with the lit fill and amber text, never solid amber.
+- **Every state says what is happening in one sentence**, then offers what to do about it. "failed" on its own is not enough: say what failed and show the last thing Claude printed. A state that needs something elsewhere links there (a signed-out failure links to the account).
+- **No dead ends.** A crashed instance that is being restarted says so; the page for a replaced instance leads to its replacement; an address that no longer exists gets a page with a way back.
 - **Flat rows with hairlines.** No cards, panels, boxes or shadows. No divider-plus-expander constructions.
 - **Every row in a list has the same shape.** If one row has a grey second line, all of them do, starting at the same left edge. Never put grey text inline after a name; it staggers.
-- **Destructive actions are quiet:** a neutral button with red text, or plain grey text for Cancel. Not a red block.
+- **Destructive actions are quiet:** a neutral button with red text (`.risky`), last in the column, with a confirmation. Not a red block.
+- **Status words are lower case** everywhere ("signed in", "running", "needs you"). Sentences and buttons use sentence case.
 - **Must look right on a phone and on a desktop.** Check both.
 
 ## Words

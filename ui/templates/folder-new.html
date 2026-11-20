@@ -7,8 +7,8 @@
   <input id="name" name="name" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required autofocus autocapitalize="none" autocorrect="off" spellcheck="false">
   <p class="small">Letters, digits, dots, dashes and underscores.</p>
   {{if gt (len .Roots) 1}}
-  <label>Inside</label>
-  <div class="chips">
+  <span class="label" id="in-label">Inside</span>
+  <div class="chips" role="radiogroup" aria-labelledby="in-label">
     {{range $i, $r := .Roots}}
     <label class="chip"><input type="radio" name="in" value="{{$r.Path}}" required{{if eq $i 0}} checked{{end}}>{{$r.Name}}</label>
     {{end}}

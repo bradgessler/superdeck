@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -573,7 +574,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	run := a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
 	waitFor(t, func() bool { return run.View().Hint == "needs-trust" })
 	page := do(a, "GET", loc, nil, "").Body.String()
-	if !strings.Contains(page, "Trust this folder?") {
+	if !strings.Contains(page, "Trust this folder") {
 		t.Errorf("trust question missing from page")
 	}
 
@@ -589,7 +590,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	do(a, "POST", loc+"/answer", url.Values{"answer": {"yes"}}, same)
 	// A question this program has never seen is shown in Claude's own words.
 	waitFor(t, func() bool { return run.View().Hint == "needs-answer" })
-	if q := do(a, "GET", loc+"/live", nil, "").Body.String(); !strings.Contains(q, "Share anonymous usage data?") {
+	if q := do(a, "GET", loc, nil, "").Body.String(); !strings.Contains(q, "Share anonymous usage data?") {
 		t.Errorf("unknown question not shown: %s", q)
 	}
 	do(a, "POST", loc+"/answer", url.Values{"answer": {"no"}}, same)
@@ -597,13 +598,13 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 	if !strings.Contains(run.Tail(), "answered=n") {
 		t.Errorf("the no answer did not reach Claude: %q", run.Tail())
 	}
-	page = do(a, "GET", loc+"/live", nil, "").Body.String()
+	page = do(a, "GET", loc, nil, "").Body.String()
 	waitFor(t, func() bool { return run.View().Link != "" })
-	page = do(a, "GET", loc+"/live", nil, "").Body.String()
+	page = do(a, "GET", loc, nil, "").Body.String()
 	if !strings.Contains(page, `href="https://claude.ai/code?environment=env_0123456789abcdefABCDEFxyz"`) {
 		t.Errorf("Open in Claude link missing or broken: %s", page)
 	}
-	if strings.Contains(page, "Trust this folder?") || !strings.Contains(page, "running") {
+	if strings.Contains(page, "Trust this folder") || !strings.Contains(page, "running") {
 		t.Errorf("page did not move on after trust: %s", page)
 	}
 
@@ -731,8 +732,15 @@ func TestSignInScreens(t *testing.T) {
 		}
 	}
 	// While you are typing, the watcher says nothing and redraws nothing.
-	if w := do(a, "GET", loc+"/watch?url=1", nil, ""); w.Code != 204 || w.Header().Get("HX-Refresh") != "" || w.Header().Get("HX-Redirect") != "" {
+	sig := regexp.MustCompile(`watch\?sig=([0-9a-f]+)`).FindStringSubmatch(page)
+	if sig == nil {
+		t.Fatal("the sign-in screen has no watcher")
+	}
+	if w := do(a, "GET", loc+"/watch?sig="+sig[1], nil, ""); w.Code != 204 || w.Header().Get("HX-Refresh") != "" || w.Header().Get("HX-Redirect") != "" {
 		t.Errorf("watcher interrupted a waiting sign-in: %v", w.Header())
+	}
+	if w := do(a, "GET", loc+"/watch?sig=stale", nil, ""); w.Header().Get("HX-Refresh") != "true" {
+		t.Error("watcher did not ask for a redraw when the screen was out of date")
 	}
 	// A wrong code lands on a clear failure with a way to retry.
 	do(a, "POST", loc+"/code", url.Values{"code": {"wrong-code"}}, same)
@@ -763,7 +771,7 @@ func TestWorkspaceFoldersCanBeLaunchedIn(t *testing.T) {
 	}
 
 	rows, _, _ := a.folders("mono", "")
-	if len(rows) < 3 || rows[0].Rel != in(a, "mono") || !strings.HasSuffix(rows[0].Note, "holds 2 repos") {
+	if len(rows) < 3 || rows[0].Rel != in(a, "mono") || !strings.HasSuffix(rows[0].Note, "2 repositories inside") {
 		t.Fatalf("typing the workspace name should find the workspace first: %+v", rows)
 	}
 	run, err := a.startServer("work", in(a, "mono"), "", 0, 0)
@@ -1294,5 +1302,96 @@ func TestSignInsCannotCrowdOutInstances(t *testing.T) {
 	}
 	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Errorf("waiting sign-ins blocked an instance: %v", err)
+	}
+}
+
+// ---- screens ----
+
+func TestInstanceScreenSaysWhatIsHappeningAndOffersOneMainAction(t *testing.T) {
+	minLife, restartBase = 0, 400*time.Millisecond
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.View().Link != "" })
+	primaries := func(html string) int { return strings.Count(html, `btn big primary`) }
+	page := do(a, "GET", "/instances/"+run.ID, nil, "").Body.String()
+	if !strings.Contains(page, "Open in Claude") || primaries(page) != 1 {
+		t.Errorf("connected screen: %d emphasised actions", primaries(page))
+	}
+	if strings.Contains(page, `hx-swap="outerHTML"`) {
+		t.Error("the instance screen redraws around its own buttons")
+	}
+
+	// It crashes: while the restart is pending the screen says so, the home
+	// list still shows it, and afterwards the old page points at the new one.
+	syscall.Kill(-run.Pid(), syscall.SIGKILL)
+	waitFor(t, func() bool { return !run.View().RestartAt.IsZero() })
+	page = do(a, "GET", "/instances/"+run.ID, nil, "").Body.String()
+	if !strings.Contains(page, "starting it again") || primaries(page) != 0 {
+		t.Errorf("restarting screen wrong (%d emphasised)", primaries(page))
+	}
+	if home := do(a, "GET", "/", nil, "").Body.String(); strings.Contains(home, "Nothing is running") || !strings.Contains(home, "restarting") {
+		t.Error("home says nothing is running while a restart is pending")
+	}
+	waitFor(t, func() bool { return run.View().Next != "" })
+	page = do(a, "GET", "/instances/"+run.ID, nil, "").Body.String()
+	if !strings.Contains(page, "/instances/"+run.View().Next) || !strings.Contains(page, "Go to the running instance") {
+		t.Error("the replaced instance does not lead to its replacement")
+	}
+	home := do(a, "GET", "/", nil, "").Body.String()
+	if strings.Count(home, `class="row-title"`) != 1 {
+		t.Errorf("home lists the replaced run as well as its replacement")
+	}
+}
+
+func TestSignedOutFailureLeadsToTheAccount(t *testing.T) {
+	a := testApp(t)
+	a.started = time.Now().Add(-time.Hour)
+	r, err := a.startServer("idle", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return !r.alive() })
+	page := do(a, "GET", "/instances/"+r.ID, nil, "").Body.String()
+	if !strings.Contains(page, `href="/accounts/idle"`) || !strings.Contains(page, "Sign in to idle") {
+		t.Errorf("no way from the failure to the account: %s", page)
+	}
+}
+
+func TestFilterBoxCannotLaunch(t *testing.T) {
+	a := testApp(t)
+	page := do(a, "GET", "/new?q=ap", nil, "").Body.String()
+	// The filter is its own form; the launch form holds no text input.
+	launch := page[strings.Index(page, `<form id="launch"`):]
+	launch = launch[:strings.Index(launch, "</form>")]
+	if strings.Contains(launch, "<input") {
+		t.Error("the launch form contains an input; Enter in it would launch")
+	}
+	if !strings.Contains(page, `value="ap"`) || !strings.Contains(page, ">app<") {
+		t.Error("the filter does not work as a plain form")
+	}
+}
+
+func TestSameLoginIsPointedOut(t *testing.T) {
+	a := testApp(t)
+	os.MkdirAll(filepath.Join(a.state, "accounts", "twin"), 0o700)
+	os.WriteFile(filepath.Join(a.state, "accounts", "twin", "in"), nil, 0o600)
+	a.refreshStatus("work")
+	a.refreshStatus("twin")
+	if page := do(a, "GET", "/accounts", nil, "").Body.String(); !strings.Contains(page, "same login as") {
+		t.Error("two accounts on one Claude login are listed without remark")
+	}
+}
+
+func TestUnknownAddressesGetAPageWithAWayBack(t *testing.T) {
+	a := testApp(t)
+	for _, p := range []string{"/instances/nope", "/accounts/nope", "/instances/nope/move"} {
+		w := do(a, "GET", p, nil, "")
+		if w.Code != 404 || !strings.Contains(w.Body.String(), `href="/"`) {
+			t.Errorf("GET %s: %d", p, w.Code)
+		}
 	}
 }

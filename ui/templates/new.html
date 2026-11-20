@@ -1,33 +1,34 @@
 {{template "head" .}}
-<div class="head">
-  <h1>New instance</h1>
-  <a class="btn" href="/">Cancel</a>
-</div>
-<form method="post" action="/instances">
-  <h2>Account</h2>
-  <div class="chips">
-    {{range .Accounts}}
-    <label class="chip">
-      <input type="radio" name="account" value="{{.ID}}" required{{if .Selected}} checked{{end}}>
-      <span class="led{{if .SignedIn}} on{{end}}"></span>{{.Name}}{{if not .SignedIn}}<small>signed out</small>{{end}}
-    </label>
-    {{else}}
-    <p class="none">No accounts yet. <a class="link" href="/accounts/new">Add one first.</a></p>
-    {{end}}
-  </div>
+<a class="backlink" href="/">‹ Instances</a>
+<h1>New instance</h1>
+<form id="launch" method="post" action="/instances"></form>
 
-  <div class="head sub">
-    <h2><label for="q">Folder</label></h2>
-    <a class="link" href="/folders/new">New folder</a>
-  </div>
-  <input id="q" type="search" name="q" placeholder="Filter {{.Total}} folders"
-    hx-get="/new/folders" hx-trigger="input changed delay:120ms, search" hx-target="#folders" hx-swap="outerHTML"
+<h2>Account</h2>
+{{if .Accounts}}
+<div class="chips">
+  {{range .Accounts}}
+  <label class="chip{{if not .SignedIn}} off{{end}}"{{if not .SignedIn}} title="{{.Name}} is {{.Who}}"{{end}}>
+    <input type="radio" name="account" value="{{.ID}}" form="launch" required{{if .Selected}} checked{{end}}{{if not .SignedIn}} disabled{{end}}>
+    <span class="led{{if .SignedIn}} on{{end}}"></span>{{.Name}}
+  </label>
+  {{end}}
+</div>
+{{if not .Usable}}<p class="small">None of these is signed in. <a class="link" href="/accounts">Sign one in</a> to launch.</p>{{end}}
+{{else}}
+<p class="small">There are no accounts yet. <a class="link" href="/accounts/new">Add one</a> to launch.</p>
+{{end}}
+
+<h2><label for="q">Folder</label></h2>
+<form method="get" action="/new" role="search">
+  <input id="q" type="search" name="q" value="{{.Q}}" placeholder="Filter {{.Total}} folders"
+    hx-get="/new/folders" hx-trigger="input changed delay:120ms" hx-target="#folders" hx-swap="outerHTML"
     hx-include="[name='folder']:checked"
     autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-  {{template "folder-list" .}}
-
-  <div class="launchbar">
-    <button class="btn primary big">Launch</button>
-  </div>
 </form>
+{{template "folder-list" .}}
+<p class="small"><a class="quiet" href="/folders/new">Create a new folder</a></p>
+
+<div class="launchbar">
+  <button class="btn primary big" form="launch"{{if or (not .Usable) (not .Total)}} disabled{{end}}>Launch</button>
+</div>
 {{template "foot" .}}

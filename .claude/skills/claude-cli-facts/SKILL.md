@@ -20,7 +20,8 @@ Seen on macOS with Claude Code 2.1.296 to 2.1.329. These are observations, not g
 
 ## Remote Control
 
-- `claude remote-control` needs a terminal. It runs correctly inside a detached tmux session started by a launchd agent, including Keychain access.
+- `claude remote-control` needs a terminal. It runs correctly on a pseudo-terminal owned by a detached holder process started from a launchd agent, including Keychain access.
+- It did not inherit well from a parent that ignores hang-ups: with `SIGHUP` ignored it survived its terminal going away and was left orphaned.
 - With one attached, an untrusted folder produces a prompt ending `Trust <path>? [y/N]` rather than exiting. Without a terminal it exits with `Workspace not trusted` (documented).
 - Once trusted, the trust is remembered in that account's config and later launches go straight through.
 - When connected it prints a block containing `Connected`, `Capacity: 1/4`, and `Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_...`. Superdeck turns that link into the "Open in Claude" button. The environment id stayed the same across restarts.
@@ -32,5 +33,7 @@ Seen on macOS with Claude Code 2.1.296 to 2.1.329. These are observations, not g
 ## Other
 
 - The CLI updates itself in the background. It went from 2.1.296 to 2.1.329 during one evening without Superdeck asking. A relaunched instance runs the new version.
+- `claude auth logout` signs an account out. Superdeck runs it when an account is removed; not yet confirmed against the real CLI that it clears the Keychain entry.
+- Killing the Claude process ends any session it was hosting; the Claude app then reports that the session could not be resumed. Restarting the instance does not bring the conversation back.
 - `claude update` checks for and installs an update. Superdeck runs it only when asked. Not yet run from Superdeck against the real CLI.
 - An instance runs with its account's config directory, not `~/.claude`. Skills, MCP servers, settings and instructions kept in `~/.claude` are therefore **not** available to instances. Project-level `.claude` folders and `CLAUDE.md` in the folder still are.
