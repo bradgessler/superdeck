@@ -36,7 +36,7 @@ Everything is rendered on the server with Go's `html/template`. The only script 
 
 Claude runs under a pseudo-terminal. Superdeck keeps a terminal emulator on the server for each process and shows its screen as escaped HTML in a collapsed "Output" section, for when you need to see what Claude printed.
 
-Dependencies: [creack/pty](https://github.com/creack/pty) for the pseudo-terminal and [hinshun/vt10x](https://github.com/hinshun/vt10x) for terminal emulation. No Node, no build step for the front end.
+Dependencies: [creack/pty](https://github.com/creack/pty) for the pseudo-terminal, [hinshun/vt10x](https://github.com/hinshun/vt10x) for terminal emulation, [modernc.org/sqlite](https://modernc.org/sqlite) (SQLite in pure Go, so the binary stays self-contained) and [pressly/goose](https://github.com/pressly/goose) for migrations. No Node, no build step for the front end.
 
 ## Run it
 
@@ -80,7 +80,11 @@ launchd then restarts Superdeck if it exits, and Superdeck relaunches the instan
 launchctl bootout gui/$(id -u)/com.github.bradgessler.superdeck
 ```
 
-State lives in `~/.superdeck`: one directory per account, the list of instances to bring back, account names, and a log.
+State lives in `~/.superdeck`: a SQLite database (`superdeck.db`) holding accounts and the instances to bring back, one Claude config directory per account, and a log.
+
+### Upgrading
+
+Replace the binary and start it. Schema changes are numbered SQL files in `migrations/`, compiled into the binary and applied on startup before anything is launched. Before changing existing data Superdeck writes a copy next to it, named `superdeck.db.before-schema-N`. If the data was written by a newer Superdeck than the one you are starting, it refuses to run rather than guess.
 
 ## Security model
 

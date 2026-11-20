@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -21,34 +20,49 @@ type wanted struct {
 	Capacity int    `json:"capacity"`
 }
 
-func (a *App) wantedPath() string { return filepath.Join(a.state, "instances.json") }
-
 func (a *App) loadWanted() []wanted {
-	var list []wanted
-	if b, err := os.ReadFile(a.wantedPath()); err == nil {
-		json.Unmarshal(b, &list)
+	list, err := a.data().Wanted()
+	if err != nil {
+		log.Printf("reading saved instances: %v", err)
 	}
 	return list
 }
 
 // remember adds or removes one instance from the saved list.
 func (a *App) remember(w wanted, keep bool) {
-	a.wantMu.Lock()
-	defer a.wantMu.Unlock()
-	var next []wanted
-	for _, o := range a.loadWanted() {
-		if o.Account != w.Account || o.Project != w.Project {
-			next = append(next, o)
+	if err := a.data().SetWanted(w, keep); err != nil {
+		log.Printf("saving instances: %v", err)
+	}
+}
+
+// importLegacy brings in accounts.json and instances.json from versions that
+// kept plain files, then sets them aside so it only happens once.
+func (a *App) importLegacy() {
+	namesFile := filepath.Join(a.state, "accounts.json")
+	if b, err := os.ReadFile(namesFile); err == nil {
+		names := map[string]string{}
+		json.Unmarshal(b, &names)
+		for _, id := range a.accountDirs() {
+			name := names[id]
+			if !accountNameRe.MatchString(name) {
+				name = id
+			}
+			if err := a.store.AddAccount(id, name); err != nil {
+				a.store.AddAccount(id, id) // name clash: fall back to the directory name
+			}
 		}
+		os.Rename(namesFile, namesFile+".imported")
+		log.Printf("imported account names from %s", namesFile)
 	}
-	if keep {
-		next = append(next, w)
-	}
-	sort.Slice(next, func(i, j int) bool { return next[i].Project+next[i].Account < next[j].Project+next[j].Account })
-	b, _ := json.MarshalIndent(next, "", "  ")
-	tmp := a.wantedPath() + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err == nil {
-		os.Rename(tmp, a.wantedPath())
+	instFile := filepath.Join(a.state, "instances.json")
+	if b, err := os.ReadFile(instFile); err == nil {
+		var list []wanted
+		json.Unmarshal(b, &list)
+		for _, w := range list {
+			a.store.SetWanted(w, true)
+		}
+		os.Rename(instFile, instFile+".imported")
+		log.Printf("imported %d saved instances from %s", len(list), instFile)
 	}
 }
 

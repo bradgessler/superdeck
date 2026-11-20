@@ -793,3 +793,71 @@ func TestMoveInstanceToAnotherAccount(t *testing.T) {
 		t.Errorf("after a restart it would come back under the wrong account: %+v", want)
 	}
 }
+
+// ---- storage ----
+
+func TestStoreMigratesOnOpenAndRefusesNewerData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "superdeck.db")
+	s, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddAccount("work", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddAccount("other", "work"); err == nil {
+		t.Error("two accounts with one name were stored")
+	}
+	s.SetWanted(wanted{"work", "/p/app", "worktree", 4}, true)
+	s.SetWanted(wanted{"work", "/p/app", "same-dir", 2}, true) // same instance, updated
+	s.db.Close()
+
+	// Opening again changes nothing and keeps the data.
+	s, err = openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := s.Wanted(); len(w) != 1 || w[0].Spawn != "same-dir" || w[0].Capacity != 2 {
+		t.Errorf("saved instances after reopening: %+v", w)
+	}
+	// Data from a newer Superdeck must not be opened by an older one.
+	if _, err := s.db.Exec(`INSERT INTO goose_db_version (version_id, is_applied) VALUES (9999, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
+	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "newer Superdeck") {
+		t.Errorf("opening newer data: %v", err)
+	}
+}
+
+func TestOldFilesAreImportedOnce(t *testing.T) {
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	state := t.TempDir()
+	for _, n := range []string{"first", "second"} {
+		os.MkdirAll(filepath.Join(state, "accounts", n), 0o700)
+	}
+	os.WriteFile(filepath.Join(state, "accounts.json"), []byte(`{"first":"renamed"}`), 0o600)
+	os.WriteFile(filepath.Join(state, "instances.json"), []byte(`[{"account":"first","project":"/p/app","spawn":"worktree","capacity":4}]`), 0o600)
+
+	a := newApp([]string{root}, state, fakeClaude(t))
+	got := a.accountList()
+	if len(got) != 2 || got[0] != (account{"first", "renamed"}) || got[1] != (account{"second", "second"}) {
+		t.Errorf("accounts after import: %+v", got)
+	}
+	if w := a.loadWanted(); len(w) != 1 || w[0].Account != "first" {
+		t.Errorf("instances after import: %+v", w)
+	}
+	for _, f := range []string{"accounts.json", "instances.json"} {
+		if _, err := os.Stat(filepath.Join(state, f)); err == nil {
+			t.Errorf("%s was left in place and would be imported again", f)
+		}
+		if _, err := os.Stat(filepath.Join(state, f+".imported")); err != nil {
+			t.Errorf("%s was not kept as a backup", f)
+		}
+	}
+	// A config directory that appears later is adopted rather than orphaned.
+	os.MkdirAll(filepath.Join(state, "accounts", "third"), 0o700)
+	if got := a.accountList(); len(got) != 3 {
+		t.Errorf("new directory not adopted: %+v", got)
+	}
+}

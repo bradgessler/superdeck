@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -42,25 +41,41 @@ var (
 // created; renaming an account only changes the name.
 type account struct{ ID, Name string }
 
-func (a *App) namesPath() string { return filepath.Join(a.state, "accounts.json") }
-
-func (a *App) names() map[string]string {
-	m := map[string]string{}
-	if b, err := os.ReadFile(a.namesPath()); err == nil {
-		json.Unmarshal(b, &m)
-	}
-	return m
-}
-
+// accountList is every account, by name. A config directory that exists on
+// disk without a row (made by hand, or by a version that kept no database) is
+// adopted, so a login is never orphaned.
 func (a *App) accountList() []account {
-	names := a.names()
-	out := []account{}
-	for _, id := range a.accounts() {
-		n := names[id]
-		if !accountNameRe.MatchString(n) {
-			n = id
+	list, err := a.data().Accounts()
+	if err != nil {
+		log.Printf("reading accounts: %v", err)
+	}
+	known := map[string]bool{}
+	names := map[string]bool{}
+	for _, ac := range list {
+		known[ac.ID], names[ac.Name] = true, true
+	}
+	adopted := false
+	for _, id := range a.accountDirs() {
+		if known[id] {
+			continue
 		}
-		out = append(out, account{id, n})
+		name := id
+		for n := 2; names[name]; n++ {
+			name = fmt.Sprintf("%s-%d", id, n)
+		}
+		if err := a.data().AddAccount(id, name); err == nil {
+			names[name], adopted = true, true
+		}
+	}
+	if adopted {
+		list, _ = a.data().Accounts()
+	}
+	// Only accounts whose directory still exists can be used.
+	out := []account{}
+	for _, ac := range list {
+		if _, err := a.accountDir(ac.ID); err == nil {
+			out = append(out, ac)
+		}
 	}
 	return out
 }
@@ -90,19 +105,11 @@ func (a *App) setName(id, name string) error {
 	if _, err := a.accountDir(id); err != nil {
 		return err
 	}
+	a.accountList() // make sure the directory has a row
 	if a.nameTaken(name, id) {
 		return errors.New("another account already has that name")
 	}
-	a.wantMu.Lock()
-	defer a.wantMu.Unlock()
-	m := a.names()
-	m[id] = name
-	b, _ := json.MarshalIndent(m, "", "  ")
-	tmp := a.namesPath() + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.namesPath())
+	return a.data().RenameAccount(id, name)
 }
 
 // addAccount creates a config directory for a new account and returns its id.
@@ -119,13 +126,13 @@ func (a *App) addAccount(name string) (string, error) {
 		rand.Read(b)
 		id = name + "-" + hex.EncodeToString(b)
 	}
-	if err := os.Mkdir(filepath.Join(a.state, "accounts", id), 0o700); err != nil {
+	dir := filepath.Join(a.state, "accounts", id)
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
 	}
-	if id != name {
-		if err := a.setName(id, name); err != nil {
-			return "", err
-		}
+	if err := a.data().AddAccount(id, name); err != nil {
+		os.Remove(dir)
+		return "", err
 	}
 	return id, nil
 }

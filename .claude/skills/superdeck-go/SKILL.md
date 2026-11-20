@@ -24,9 +24,17 @@ Superdeck's safety is that it can only run a short list of commands. Keep it tha
 - Third-party parsing of process output (the terminal emulator) is wrapped in `recover`. A panic there degrades one process to plain text; it must never take Superdeck down, because every instance dies with it.
 - Launched instances are remembered in `instances.json` and relaunched by `restore`. Entries go through the same validation as a fresh launch.
 
+## Data and migrations
+
+- Superdeck's own data is one SQLite file, `superdeck.db`, through `store.go`. Claude's data stays in each account's config directory; never store credentials.
+- **Never edit a migration that has shipped.** Change the schema by adding the next numbered file to `migrations/` with `-- +goose Up` and `-- +goose Down` sections. It is applied automatically at startup.
+- A migration must be safe on real data: this is open source and other people's databases will run it unattended. Add columns with defaults; do not drop data without a copy.
+- Startup order is fixed: open and migrate, then listen, then relaunch instances. A failed migration must stop startup.
+- An account's `id` is its config directory name and never changes. Its `name` is for people.
+
 ## Conventions
 
-- Standard library first. Current dependencies: `creack/pty`, `hinshun/vt10x`.
+- Standard library first. Current dependencies: `creack/pty`, `hinshun/vt10x`, `modernc.org/sqlite`, `pressly/goose`.
 - `gofmt`, `go vet`, and `go test -race ./...` clean before committing.
 - Errors shown to a person are lower-case sentences without a full stop; `fail()` in `web.go` formats them.
 - Comments explain why, especially for anything that looks odd.

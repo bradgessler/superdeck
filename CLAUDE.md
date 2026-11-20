@@ -31,7 +31,9 @@ These came from the person who owns this project. Treat them as requirements.
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
 | `proc.go` | one supervised process: pseudo-terminal, terminal emulator, prompt detection |
 | `paths.go` | allowed folders, folder listing, path confinement |
-| `persist.go` | remembered instances, the launchd agent |
+| `store.go` | the SQLite store and migration runner |
+| `migrations/` | numbered SQL schema changes, compiled into the binary |
+| `persist.go` | remembered instances, import of pre-database files, the launchd agent |
 | `ui/templates` | every screen; `layout.html` holds the shared pieces |
 | `ui/static` | `app.css` and the vendored `htmx.min.js` |
 

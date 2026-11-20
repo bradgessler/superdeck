@@ -40,8 +40,10 @@ type App struct {
 	ver     string
 	verAt   time.Time
 	closing atomic.Bool
-	wantMu  sync.Mutex
 	started time.Time
+
+	storeOnce sync.Once
+	store     *Store
 }
 
 func newApp(roots []string, state, claude string) *App {
@@ -97,6 +99,11 @@ func main() {
 		return
 	}
 	if err := os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700); err != nil {
+		log.Fatal(err)
+	}
+	// Open the data, upgrading its schema if this is a newer Superdeck.
+	// Nothing is launched and nothing listens until that has succeeded.
+	if err := a.openData(); err != nil {
 		log.Fatal(err)
 	}
 	if err := a.allowHosts(*addr, *extra); err != nil {
@@ -182,7 +189,33 @@ func (a *App) guard(next http.Handler) http.Handler {
 	})
 }
 
-func (a *App) accounts() []string {
+// openData opens Superdeck's database, applying schema migrations, and
+// brings in anything saved by versions that kept plain files.
+func (a *App) openData() error {
+	st, err := openStore(filepath.Join(a.state, "superdeck.db"))
+	if err != nil {
+		return err
+	}
+	a.store = st
+	a.importLegacy()
+	return nil
+}
+
+// data returns the store, opening it on first use. main opens it explicitly
+// so a failed upgrade stops startup with a clear message.
+func (a *App) data() *Store {
+	a.storeOnce.Do(func() {
+		if a.store == nil {
+			if err := a.openData(); err != nil {
+				panic(err)
+			}
+		}
+	})
+	return a.store
+}
+
+// accountDirs lists the account config directories on disk.
+func (a *App) accountDirs() []string {
 	es, _ := os.ReadDir(filepath.Join(a.state, "accounts"))
 	out := []string{}
 	for _, e := range es {
