@@ -5,16 +5,14 @@
 </div>
 <div class="rows">
   {{range .Accounts}}
-  <div>
+  <a href="/accounts/{{.ID}}">
     <span class="led{{if .Pending}} wait{{else if .SignedIn}} on{{end}}"></span>
     <span class="row-body">
       <span class="row-title">{{.Name}}</span>
       <span class="row-sub">{{.Who}}</span>
     </span>
-    <a class="btn quiet" href="/accounts/{{.ID}}/rename">Rename</a>
-    {{if .Pending}}<a class="btn" href="/instances/{{.Pending}}">Continue</a>
-    {{else}}<form method="post" action="/accounts/{{.ID}}/signin"><button class="btn{{if .SignedIn}} quiet{{end}}">{{if .SignedIn}}Sign in again{{else}}Sign in{{end}}</button></form>{{end}}
-  </div>
+    <span class="chev" aria-hidden="true">›</span>
+  </a>
   {{else}}
   <div class="empty"><b>No accounts yet.</b>Add one for each Claude login you want to run instances under.</div>
   {{end}}

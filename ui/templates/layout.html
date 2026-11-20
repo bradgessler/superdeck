@@ -106,7 +106,7 @@
   {{if and .I.IsLogin (not .I.Live)}}
   <div class="ask-buttons after">
     {{if .I.Failed}}<form method="post" action="/accounts/{{.I.AccountID}}/signin"><button class="btn primary">Try again</button></form>{{end}}
-    <a class="btn" href="/accounts">Back to accounts</a>
+    <a class="btn" href="/accounts/{{.I.AccountID}}">Back to {{.I.Account}}</a>
   </div>
   {{end}}
 

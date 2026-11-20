@@ -1,5 +1,5 @@
 {{template "head" .}}
-<a class="backlink" href="/accounts">‹ Accounts</a>
+<a class="backlink" href="/accounts/{{.ID}}">‹ {{.Name}}</a>
 <h1>Rename account</h1>
 <p class="lede">This only changes the name shown here. The Claude login stays as it is.</p>
 <form method="post" action="/accounts/{{.ID}}/rename" class="stack">

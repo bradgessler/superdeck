@@ -1,0 +1,18 @@
+{{template "head" .}}
+<a class="backlink" href="/accounts">‹ Accounts</a>
+<h1>{{.A.Name}}</h1>
+<p class="status"><span class="led{{if .A.Pending}} wait{{else if .A.SignedIn}} on{{end}}"></span><b class="{{if .A.Pending}}wait{{else if .A.SignedIn}}on{{end}}">{{if .A.Pending}}signing in{{else if .A.SignedIn}}signed in{{else}}signed out{{end}}</b></p>
+{{if .A.Email}}<p class="meta">{{.A.Email}}</p>{{end}}
+{{if .A.Org}}<p class="meta">{{.A.Org}}</p>{{end}}
+
+<div class="actions">
+  {{if .A.Pending}}<a class="btn primary big" href="/instances/{{.A.Pending}}">Continue signing in</a>
+  {{else}}<form method="post" action="/accounts/{{.A.ID}}/signin"><button class="btn big{{if not .A.SignedIn}} primary{{end}}">{{if .A.SignedIn}}Sign in again{{else}}Sign in{{end}}</button></form>{{end}}
+  <a class="btn big" href="/accounts/{{.A.ID}}/rename">Rename</a>
+</div>
+
+{{if .Running}}
+<h2>Running under this account</h2>
+<div class="rows">{{range .Running}}{{template "instance-row" .}}{{end}}</div>
+{{end}}
+{{template "foot" .}}

@@ -195,3 +195,5 @@ input:focus { border-color: var(--amber); outline: none; }
 
 .question { margin: 0 0 14px; padding: 12px; border-radius: 10px; background: #0b0908; color: #d9d0c5; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask-buttons.after { margin-top: 22px; }
+
+.actions { display: grid; gap: 10px; max-width: 460px; margin-top: 26px; }

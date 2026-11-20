@@ -450,11 +450,21 @@ func TestEveryPageRendersEvenWhenEmpty(t *testing.T) {
 	empty.allowHosts(host, "")
 	for _, a := range []*App{empty, testApp(t)} {
 		for _, p := range []string{"/", "/instances", "/new", "/new/folders?q=a", "/folders/new", "/accounts", "/accounts/new"} {
+			if a != empty && p == "/accounts" {
+				for _, sub := range []string{"/accounts/work", "/accounts/idle", "/accounts/work/rename"} {
+					if w := do(a, "GET", sub, nil, ""); w.Code != 200 {
+						t.Errorf("GET %s: %d", sub, w.Code)
+					}
+				}
+			}
 			w := do(a, "GET", p, nil, "")
 			if w.Code != 200 || !strings.Contains(w.Body.String(), "<") || strings.Contains(w.Body.String(), "<no value>") {
 				t.Errorf("GET %s: %d %q", p, w.Code, w.Body.String())
 			}
 		}
+	}
+	if w := do(empty, "GET", "/accounts/nope", nil, ""); w.Code != 404 {
+		t.Errorf("missing account: %d", w.Code)
 	}
 	if w := do(empty, "GET", "/instances/nope", nil, ""); w.Code != 404 {
 		t.Errorf("missing instance: %d", w.Code)

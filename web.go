@@ -30,6 +30,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /accounts", a.pageAccounts)
 	mux.HandleFunc("GET /accounts/new", a.pageNewAccount)
 	mux.HandleFunc("POST /accounts", a.doNewAccount)
+	mux.HandleFunc("GET /accounts/{id}", a.pageAccount)
 	mux.HandleFunc("GET /accounts/{id}/rename", a.pageRename)
 	mux.HandleFunc("POST /accounts/{id}/rename", a.doRename)
 	mux.HandleFunc("POST /accounts/{id}/signin", a.doSignIn)
@@ -118,6 +119,7 @@ func remember(w http.ResponseWriter, name, value string) {
 
 type accountView struct {
 	ID, Name, Who string
+	Email, Org    string
 	SignedIn      bool
 	Pending       string // id of a sign-in in progress
 	Selected      bool
@@ -131,13 +133,9 @@ func (a *App) accountViews(selected string) []accountView {
 		v := accountView{ID: ac.ID, Name: ac.Name, Who: "Signed out", Selected: ac.ID == selected}
 		if in, _ := st["loggedIn"].(bool); in {
 			v.SignedIn = true
-			var parts []string
-			for _, k := range []string{"email", "orgName"} {
-				if s, _ := st[k].(string); s != "" {
-					parts = append(parts, s)
-				}
-			}
-			v.Who = strings.Join(parts, " · ")
+			v.Email, _ = st["email"].(string)
+			v.Org, _ = st["orgName"].(string)
+			v.Who = v.Email
 			if v.Who == "" {
 				v.Who = "Signed in"
 			}
@@ -394,6 +392,28 @@ func (a *App) pageAccounts(w http.ResponseWriter, r *http.Request) {
 	render(w, "accounts.html", d)
 }
 
+// pageAccount is one account: who it is signed in as and what you can do.
+func (a *App) pageAccount(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	for _, v := range a.accountViews("") {
+		if v.ID != id {
+			continue
+		}
+		d := page(r, v.Name, "accounts")
+		d["A"] = v
+		var running []instanceView
+		for _, rv := range a.mgr.List() {
+			if rv.Kind == "server" && rv.Account == id && !rv.Done {
+				running = append(running, a.instance(rv))
+			}
+		}
+		d["Running"] = running
+		render(w, "account.html", d)
+		return
+	}
+	http.NotFound(w, r)
+}
+
 func (a *App) pageNewAccount(w http.ResponseWriter, r *http.Request) {
 	render(w, "account-new.html", page(r, "Add account", "accounts"))
 }
@@ -429,7 +449,7 @@ func (a *App) doRename(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "/accounts/"+url.PathEscape(id)+"/rename", err)
 		return
 	}
-	to(w, r, "/accounts")
+	to(w, r, "/accounts/"+url.PathEscape(id))
 }
 
 func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
@@ -442,7 +462,7 @@ func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := a.startLogin(r.PathValue("id"))
 	if err != nil {
-		fail(w, r, "/accounts", err)
+		fail(w, r, "/accounts/"+url.PathEscape(r.PathValue("id")), err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)

@@ -1,5 +1,5 @@
 {{template "head" .}}
-<a class="backlink" href="{{if .I.IsLogin}}/accounts{{else}}/{{end}}">‹ {{if .I.IsLogin}}Accounts{{else}}Instances{{end}}</a>
+<a class="backlink" href="{{if .I.IsLogin}}/accounts/{{.I.AccountID}}{{else}}/{{end}}">‹ {{if .I.IsLogin}}{{.I.Account}}{{else}}Instances{{end}}</a>
 {{template "instance-live" .}}
 
 {{if and .I.IsLogin .I.Live}}
