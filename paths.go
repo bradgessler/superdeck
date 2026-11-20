@@ -175,6 +175,7 @@ func createProject(root, name string) (string, error) {
 	}
 	cmd := exec.Command("git", "init", "-q")
 	cmd.Dir = dir
+	cmd.Env = childEnv("") // the same explicit environment everything else gets
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", errors.New("git init failed: " + strings.TrimSpace(string(out)))
 	}

@@ -210,3 +210,12 @@ func (s *Store) LiveRuns() ([]*Run, error) {
 func (s *Store) Prune() {
 	s.db.Exec(`DELETE FROM runs WHERE ended_at IS NOT NULL AND ended_at < datetime('now', '-7 days')`)
 }
+
+// RemoveAccount forgets an account and any instances saved under it.
+func (s *Store) RemoveAccount(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM instances WHERE account_id = ?`, id); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM accounts WHERE id = ?`, id)
+	return err
+}

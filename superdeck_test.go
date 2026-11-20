@@ -128,6 +128,7 @@ case "$1 $2" in
   "--version "*) echo "9.9.9 (Claude Code)" ;;
   "auth status")
     if [ -f "$C/in" ]; then echo '{"loggedIn":true,"email":"t@example.com"}'; else echo '{"loggedIn":false}'; exit 1; fi ;;
+  "auth logout") rm -f "$C/in"; echo "Signed out." ;;
   "auth login")
     echo "If the browser didn't open, visit: https://claude.ai/oauth/authorize?state=abc"
     printf "Paste code here if prompted > "; read code
@@ -557,7 +558,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 
 	// Launching under a signed-out account sends you to Accounts with a reason.
 	w := do(a, "POST", "/instances", url.Values{"account": {"idle"}, "folder": {in(a, "app")}}, same)
-	if loc := w.Header().Get("Location"); w.Code != 303 || !strings.HasPrefix(loc, "/accounts?error=") {
+	if loc := w.Header().Get("Location"); w.Code != 303 || !strings.HasPrefix(loc, "/accounts/idle?error=") {
 		t.Fatalf("signed-out launch: %d %q", w.Code, loc)
 	}
 	if n := len(servers(a)); n != 0 {
@@ -1178,5 +1179,120 @@ func TestSignInButtonOnlyEverPointsAtAnthropic(t *testing.T) {
 		if got := signInURL(text); got != want {
 			t.Errorf("signInURL(%q) = %q, want %q", text, got, want)
 		}
+	}
+}
+
+// ---- security findings from review ----
+
+func TestLaunchOnlyInFoldersThatAreOffered(t *testing.T) {
+	a := testApp(t)
+	os.MkdirAll(in(a, "app/.git/hooks"), 0o755)
+	os.MkdirAll(in(a, "app/node_modules/pkg"), 0o755)
+	os.MkdirAll(in(a, ".hidden/.git"), 0o755)
+	for _, bad := range []string{in(a, "app/.git/hooks"), in(a, "app/.git"), in(a, "app/node_modules/pkg"), in(a, ".hidden")} {
+		if _, err := a.startServer("work", bad, "same-dir", 0, 0); err == nil {
+			t.Errorf("launched in %s", bad)
+		}
+		w := do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {bad}}, same)
+		if !strings.Contains(w.Header().Get("Location"), "error=") {
+			t.Errorf("launch in %s over HTTP: %q", bad, w.Header().Get("Location"))
+		}
+	}
+	if n := len(servers(a)); n != 0 {
+		t.Errorf("%d instances started", n)
+	}
+}
+
+func TestAccountsAreCappedAndCanBeRemoved(t *testing.T) {
+	a := testApp(t)
+	for i := 0; len(a.accountList()) < maxAccounts; i++ {
+		if _, err := a.addAccount(fmt.Sprintf("extra-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := a.addAccount("one-too-many"); err == nil {
+		t.Error("account limit not enforced")
+	}
+	// Removing signs it out with the CLI and deletes its directory.
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := do(a, "POST", "/accounts/work/remove", url.Values{}, same); !strings.Contains(w.Header().Get("Location"), "error=") {
+		t.Error("removed an account with an instance running under it")
+	}
+	run.Stop()
+	waitFor(t, func() bool { return !run.alive() })
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	if w := do(a, "POST", "/accounts/work/remove", url.Values{}, same); w.Header().Get("Location") != "/accounts" {
+		t.Fatalf("remove: %q", w.Header().Get("Location"))
+	}
+	if _, err := os.Stat(filepath.Join(a.state, "accounts", "work")); err == nil {
+		t.Error("the account's directory is still there")
+	}
+	if a.isWanted("work", in(a, "app")) {
+		t.Error("an instance is still saved under the removed account")
+	}
+	for _, ac := range a.accountList() {
+		if ac.ID == "work" {
+			t.Error("the account is still listed")
+		}
+	}
+}
+
+func TestCrossSiteReadsAreRefused(t *testing.T) {
+	a := testApp(t)
+	get := func(site string) int {
+		r := httptest.NewRequest("GET", "/new/folders?q=x", nil)
+		r.Host = host
+		if site != "" {
+			r.Header.Set("Sec-Fetch-Site", site)
+		}
+		w := httptest.NewRecorder()
+		a.routes().ServeHTTP(w, r)
+		return w.Code
+	}
+	if c := get("cross-site"); c != 403 {
+		t.Errorf("a page on another site could load this: %d", c)
+	}
+	for _, ok := range []string{"", "same-origin", "none"} {
+		if c := get(ok); c != 200 {
+			t.Errorf("Sec-Fetch-Site %q: %d", ok, c)
+		}
+	}
+}
+
+func TestLoadingPagesNeverWaitsOnAccountChecks(t *testing.T) {
+	a := testApp(t)
+	// A CLI that hangs when asked who is signed in.
+	slow := filepath.Join(t.TempDir(), "claude")
+	os.WriteFile(slow, []byte("#!/bin/sh\ncase \"$1\" in --version) echo 1.0;; *) sleep 30;; esac\n"), 0o755)
+	a.claude = slow
+	for _, p := range []string{"/accounts", "/new", "/accounts/work"} {
+		start := time.Now()
+		w := do(a, "GET", p, nil, "")
+		if d := time.Since(start); w.Code != 200 || d > 2*time.Second {
+			t.Errorf("GET %s took %s (status %d)", p, d, w.Code)
+		}
+	}
+}
+
+func TestSignInsCannotCrowdOutInstances(t *testing.T) {
+	a := testApp(t)
+	for i := 0; i < maxLogins; i++ {
+		id, err := a.addAccount(fmt.Sprintf("pending-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.startLogin(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, _ := a.addAccount("one-more")
+	if _, err := a.startLogin(id); err == nil {
+		t.Error("sign-in limit not enforced")
+	}
+	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
+		t.Errorf("waiting sign-ins blocked an instance: %v", err)
 	}
 }

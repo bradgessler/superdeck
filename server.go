@@ -44,11 +44,20 @@ type App struct {
 
 	storeOnce sync.Once
 	store     *Store
+
+	checkMu  sync.Mutex
+	checking map[string]bool // accounts with a status check in flight
+	checkSem chan struct{}   // how many `claude auth status` may run at once
+
+	folderMu sync.Mutex
+	folderAt time.Time
+	folderLs []folder
 }
 
 func newApp(roots []string, state, claude string) *App {
 	a := &App{roots: roots, state: state, claude: claude, started: time.Now(),
-		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
+		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{},
+		checking: map[string]bool{}, checkSem: make(chan struct{}, 2)}
 	self, err := os.Executable()
 	if err != nil {
 		self = os.Args[0]
@@ -222,12 +231,20 @@ func (a *App) guard(next http.Handler) http.Handler {
 				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}
+			// With no sign-in, this log is the only record of who did what.
+			from, _, _ := net.SplitHostPort(r.RemoteAddr)
+			log.Printf("%s %s from %s", r.Method, r.URL.Path, from)
+		} else if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" {
+			// Another site has no business even reading these pages, and
+			// should not be able to make this Mac do work by embedding them.
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
@@ -236,9 +253,13 @@ func (a *App) guard(next http.Handler) http.Handler {
 // openData opens Superdeck's database, applying schema migrations, and
 // brings in anything saved by versions that kept plain files.
 func (a *App) openData() error {
-	st, err := openStore(filepath.Join(a.state, "superdeck.db"))
+	path := filepath.Join(a.state, "superdeck.db")
+	st, err := openStore(path)
 	if err != nil {
 		return err
+	}
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		os.Chmod(f, 0o600) // it may predate the stricter permissions
 	}
 	a.store = st
 	a.importLegacy()
@@ -310,25 +331,85 @@ func (a *App) refreshStatus(name string) {
 	a.statusMu.Unlock()
 }
 
-// accountStatus returns the cached sign-in state, checking once if there is
-// none and re-checking in the background when it is a couple of minutes old.
+// accountStatus returns what is known about an account's sign-in without
+// waiting. If nothing is known yet, or it is a couple of minutes old, a check
+// starts in the background; pages show "checking" until it lands. Loading a
+// page never runs a command inline.
 func (a *App) accountStatus(name string) map[string]any {
 	a.statusMu.Lock()
 	st, ok := a.status[name]
-	stale := ok && time.Since(a.statusAt[name]) > 2*time.Minute
-	if stale {
-		a.statusAt[name] = time.Now()
-	}
+	stale := !ok || time.Since(a.statusAt[name]) > 2*time.Minute
 	a.statusMu.Unlock()
+	if stale {
+		a.checkSoon(name)
+	}
 	if !ok {
-		a.refreshStatus(name)
-		a.statusMu.Lock()
-		st = a.status[name]
-		a.statusMu.Unlock()
-	} else if stale {
-		go a.refreshStatus(name)
+		return map[string]any{"checking": true}
 	}
 	return st
+}
+
+// accountStatusNow is for decisions that must not be made on a guess, such as
+// launching: it waits for a check if nothing is known yet.
+func (a *App) accountStatusNow(name string) map[string]any {
+	a.statusMu.Lock()
+	st, ok := a.status[name]
+	a.statusMu.Unlock()
+	if ok {
+		return st
+	}
+	a.refreshStatus(name)
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return a.status[name]
+}
+
+// checkSoon starts a background status check, at most one per account and a
+// couple at a time overall.
+func (a *App) checkSoon(name string) {
+	a.checkMu.Lock()
+	if a.checking[name] {
+		a.checkMu.Unlock()
+		return
+	}
+	a.checking[name] = true
+	a.checkMu.Unlock()
+	go func() {
+		a.checkSem <- struct{}{}
+		a.refreshStatus(name)
+		<-a.checkSem
+		a.checkMu.Lock()
+		delete(a.checking, name)
+		a.checkMu.Unlock()
+	}()
+}
+
+// folderList is every folder an instance may be launched in. Walking the
+// allowed folders is not free, so the result is kept for a few seconds.
+func (a *App) folderList() []folder {
+	a.folderMu.Lock()
+	defer a.folderMu.Unlock()
+	if a.folderLs == nil || time.Since(a.folderAt) > 5*time.Second {
+		a.folderLs, a.folderAt = listProjects(a.roots), time.Now()
+	}
+	return a.folderLs
+}
+
+// offered reports whether dir is one of the folders Superdeck lists. Being
+// somewhere inside an allowed folder is not enough: hidden directories and
+// the insides of repositories are not places to run an instance.
+func (a *App) offered(dir string) bool {
+	for pass := 0; pass < 2; pass++ {
+		for _, f := range a.folderList() {
+			if f.Path == dir {
+				return true
+			}
+		}
+		a.folderMu.Lock()
+		a.folderLs = nil // it may have been created a moment ago
+		a.folderMu.Unlock()
+	}
+	return false
 }
 
 // tilde shortens a path under the home directory for display.

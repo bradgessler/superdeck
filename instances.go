@@ -35,6 +35,7 @@ var (
 	loginTimeout = 15 * time.Minute
 	bootRetry    = 30 * time.Second
 	answerWait   = 700 * time.Millisecond
+	maxAccounts  = 12
 )
 
 // An account is a Claude config directory plus the name shown for it. Claude
@@ -121,6 +122,9 @@ func (a *App) addAccount(name string) (string, error) {
 	if a.nameTaken(name, "") {
 		return "", errors.New("an account already has that name")
 	}
+	if len(a.accountList()) >= maxAccounts {
+		return "", errors.New("that is as many accounts as Superdeck keeps; remove one first")
+	}
 	id := name
 	if _, err := os.Stat(filepath.Join(a.state, "accounts", id)); err == nil {
 		b := make([]byte, 3)
@@ -169,6 +173,9 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	dir, err := resolveProject(a.roots, project)
 	if err != nil {
 		return nil, err
+	}
+	if !a.offered(dir) {
+		return nil, errors.New("that folder is not one Superdeck can launch in")
 	}
 	if spawn == "" {
 		// A repository gives each session its own worktree. A folder that only
@@ -310,12 +317,15 @@ func (a *App) canStart(accountID, folder string, replacing *Run) error {
 	if _, err := a.accountDir(accountID); err != nil {
 		return err
 	}
-	if in, _ := a.accountStatus(accountID)["loggedIn"].(bool); !in {
+	if in, _ := a.accountStatusNow(accountID)["loggedIn"].(bool); !in {
 		return fmt.Errorf("sign in to %s first", a.accountName(accountID))
 	}
 	dir, err := resolveProject(a.roots, folder)
 	if err != nil {
 		return err
+	}
+	if !a.offered(dir) {
+		return errors.New("that folder is not one Superdeck can launch in")
 	}
 	servers := 0
 	for _, v := range a.mgr.List() {
@@ -540,4 +550,35 @@ func (a *App) adopt() bool {
 	}
 	a.data().Prune()
 	return true
+}
+
+// removeAccount signs an account out with Anthropic's own command, then
+// deletes its config directory and forgets it. It refuses while anything is
+// running under the account.
+func (a *App) removeAccount(id string) error {
+	dir, err := a.accountDir(id)
+	if err != nil {
+		return err
+	}
+	for _, v := range a.mgr.List() {
+		if v.Account == id && !v.Done {
+			return errors.New("stop what is running under this account first")
+		}
+	}
+	// Signing out removes the login from the Keychain; deleting the directory
+	// alone would leave it there with nothing pointing at it.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, a.claude, "auth", "logout")
+	cmd.Env = childEnv(dir)
+	cmd.Dir = dir
+	cmd.Run() // best effort: an account that was never signed in has nothing to sign out of
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	a.statusMu.Lock()
+	delete(a.status, id)
+	delete(a.statusAt, id)
+	a.statusMu.Unlock()
+	return a.data().RemoveAccount(id)
 }

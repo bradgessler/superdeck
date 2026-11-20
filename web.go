@@ -34,6 +34,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /accounts/{id}", a.pageAccount)
 	mux.HandleFunc("POST /accounts/{id}/rename", a.doRename)
 	mux.HandleFunc("POST /accounts/{id}/signin", a.doSignIn)
+	mux.HandleFunc("POST /accounts/{id}/remove", a.doRemoveAccount)
 
 	mux.HandleFunc("GET /instances/{id}", a.pageInstance)
 	mux.HandleFunc("GET /instances/{id}/output", a.pageOutput)
@@ -125,6 +126,7 @@ type accountView struct {
 	ID, Name, Who string
 	Email, Org    string
 	SignedIn      bool
+	Checking      bool   // sign-in state not known yet
 	Pending       string // id of a sign-in in progress
 	Selected      bool
 }
@@ -134,19 +136,22 @@ func (a *App) accountViews(selected string) []accountView {
 	out := []accountView{}
 	for _, ac := range a.accountList() {
 		st := a.accountStatus(ac.ID)
-		v := accountView{ID: ac.ID, Name: ac.Name, Who: "Signed out", Selected: ac.ID == selected}
+		v := accountView{ID: ac.ID, Name: ac.Name, Who: "signed out", Selected: ac.ID == selected}
+		if c, _ := st["checking"].(bool); c {
+			v.Who, v.Checking = "checking…", true
+		}
 		if in, _ := st["loggedIn"].(bool); in {
 			v.SignedIn = true
 			v.Email, _ = st["email"].(string)
 			v.Org, _ = st["orgName"].(string)
 			v.Who = v.Email
 			if v.Who == "" {
-				v.Who = "Signed in"
+				v.Who = "signed in"
 			}
 		}
 		for _, r := range runs {
 			if r.Kind == "login" && r.Account == ac.ID && !r.Done {
-				v.Pending, v.Who = r.ID, "Sign-in in progress"
+				v.Pending, v.Who = r.ID, "signing in"
 			}
 		}
 		out = append(out, v)
@@ -248,7 +253,7 @@ type folderView struct {
 // that only matches by its path, so typing a workspace's name finds the
 // workspace first. The selected folder always stays in the list.
 func (a *App) folders(q, selected string) (rows []folderView, more, total int) {
-	all := listProjects(a.roots)
+	all := a.folderList()
 	total = len(all)
 	q = strings.ToLower(strings.TrimSpace(q))
 	limit := 8
@@ -378,10 +383,12 @@ func (a *App) doLaunch(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "/new", fmt.Errorf("pick a folder"))
 		return
 	}
-	remember(w, "sd_account", acct)
-	remember(w, "sd_folder", folder)
-	if in, _ := a.accountStatus(acct)["loggedIn"].(bool); !in {
-		fail(w, r, "/accounts", fmt.Errorf("%s is signed out; sign it in first", a.accountName(acct)))
+	if _, err := a.accountDir(acct); err != nil {
+		fail(w, r, "/new", err)
+		return
+	}
+	if in, _ := a.accountStatusNow(acct)["loggedIn"].(bool); !in {
+		fail(w, r, "/accounts/"+url.PathEscape(acct), fmt.Errorf("sign in to %s first", a.accountName(acct)))
 		return
 	}
 	run, err := a.startServer(acct, folder, "", 0, 0)
@@ -390,6 +397,8 @@ func (a *App) doLaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	remember(w, "sd_account", acct)
+	remember(w, "sd_folder", folder)
 	to(w, r, "/instances/"+run.ID)
 }
 
@@ -419,6 +428,9 @@ func (a *App) doNewFolder(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "/folders/new", err)
 		return
 	}
+	a.folderMu.Lock()
+	a.folderLs = nil
+	a.folderMu.Unlock()
 	to(w, r, "/new?folder="+url.QueryEscape(rel))
 }
 
@@ -477,6 +489,15 @@ func (a *App) doRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	to(w, r, "/accounts/"+url.PathEscape(id))
+}
+
+func (a *App) doRemoveAccount(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := a.removeAccount(id); err != nil {
+		fail(w, r, "/accounts/"+url.PathEscape(id), err)
+		return
+	}
+	to(w, r, "/accounts")
 }
 
 func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
