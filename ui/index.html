@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Superdeck</title>
+<link rel="stylesheet" href="/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header><h1>Superdeck</h1><span id="root"></span></header>
+<p id="error" hidden></p>
+
+<main id="home">
+  <section>
+    <h2>Start a server</h2>
+    <form id="start">
+      <label>Account <select id="account" required></select></label>
+      <label>Project <select id="project" required></select></label>
+      <label>Sessions share
+        <select id="spawn">
+          <option value="worktree">Nothing: each gets its own Git worktree</option>
+          <option value="same-dir">One folder: all edit the same files</option>
+        </select>
+      </label>
+      <button>Start</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Running</h2>
+    <ul id="runs" class="list"></ul>
+  </section>
+
+  <section>
+    <h2>Accounts</h2>
+    <ul id="accounts" class="list"></ul>
+    <form id="add-account" class="inline">
+      <input id="account-name" placeholder="new account label, e.g. overton" pattern="[a-z0-9][a-z0-9-]{0,31}" required autocapitalize="none" autocorrect="off">
+      <button>Add</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>New project</h2>
+    <form id="add-project" class="inline">
+      <input id="project-name" placeholder="folder name" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" required autocapitalize="none" autocorrect="off">
+      <button>Create</button>
+    </form>
+  </section>
+</main>
+
+<main id="console" hidden>
+  <div class="bar">
+    <button id="back" type="button">Back</button>
+    <strong id="console-title"></strong>
+    <button id="stop" type="button" class="danger">Stop</button>
+  </div>
+  <p id="console-hint" hidden></p>
+  <a id="console-url" hidden target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a>
+  <div id="term"></div>
+  <div class="keys" id="keys">
+    <button type="button" data-k="&#13;">Enter</button>
+    <button type="button" data-k="y">y</button>
+    <button type="button" data-k="n">n</button>
+    <button type="button" data-k="1">1</button>
+    <button type="button" data-k="2">2</button>
+    <button type="button" data-k="&#27;[A">Up</button>
+    <button type="button" data-k="&#27;[B">Down</button>
+    <button type="button" data-k="&#27;">Esc</button>
+  </div>
+  <form id="paste" class="inline">
+    <input id="paste-text" placeholder="paste a code or type a reply" autocapitalize="none" autocorrect="off" autocomplete="off">
+    <button>Send</button>
+  </form>
+</main>
+
+<script src="/vendor/xterm/xterm.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
