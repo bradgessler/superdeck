@@ -128,7 +128,7 @@ C="$CLAUDE_CONFIG_DIR"
 case "$1 $2" in
   "--version "*) echo "9.9.9 (Claude Code)" ;;
   "auth status")
-    if [ -f "$C/in" ]; then echo '{"loggedIn":true,"email":"t@example.com"}'; else echo '{"loggedIn":false}'; exit 1; fi ;;
+    if [ -f "$C/in" ]; then E=t@example.com; [ -f "$C/email" ] && E=$(cat "$C/email"); echo "{\"loggedIn\":true,\"email\":\"$E\"}"; else echo '{"loggedIn":false}'; exit 1; fi ;;
   "auth logout") rm -f "$C/in"; echo "Signed out." ;;
   "auth login")
     echo "If the browser didn't open, visit: https://claude.ai/oauth/authorize?state=abc"

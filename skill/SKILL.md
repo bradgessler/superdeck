@@ -11,6 +11,14 @@ If `$SUPERDECK` is empty, this session was started before Superdeck could be rea
 
 Do these things when the user asks for them, not on your own initiative. Each one changes what is running on their Mac.
 
+## Asking the user
+
+Several things below need an answer from the user first: a yes or no, or which account. If you have a tool that puts a question to the user with choices to tap (AskUserQuestion), use it, with the question in one line and the choices as short labels such as "Yes, trust it" and "No". They are often on a phone, and a tap is easier than typing. Without such a tool, ask in one short sentence. Either way, only what the user answers counts: never choose for them.
+
+## Which Claude login the user needs
+
+Each account is signed in as a Claude login, an email address that `accounts` shows. The Claude app lists only the instances of the login the app itself is signed in as. So when you launch under, or move to, an account whose login is not this session's, the user will not see the new instance until they switch account in the Claude app. Superdeck says so in its reply when this applies. Pass it on plainly, with the address to switch to, as the last thing you tell them.
+
 ## Looking
 
 ```bash
@@ -27,7 +35,7 @@ Moving stops this instance and starts it again under the other account. **This c
 
 1. If the user did not say which account, run `"$SUPERDECK" accounts` and ask.
 2. Finish or park what you are doing. In a Git repository, commit work in progress on the current branch (a commit marked WIP is fine). Do not push unless the user asked.
-3. Tell the user, in one or two sentences, that you are moving the work now, that this conversation will end, and that they should start a new session for this folder in the Claude app and ask it to pick up where this left off. If the other account has not worked in this folder before, add that Claude will first ask whether to trust the folder, and that the new session's first job is to put that question to them. Say all this before the command: you will not get to say anything after it.
+3. Tell the user, in one or two sentences, that you are moving the work now, that this conversation will end, and that they should start a new session for this folder in the Claude app and ask it to pick up where this left off. If the other account has not worked in this folder before, add that Claude will first ask whether to trust the folder, and that the new session's first job is to put that question to them. If that account's login, as `accounts` shows it, is not this session's, say they must first switch the Claude app to that address. Say all this before the command: you will not get to say anything after it.
 4. Run the move as your last action, with handoff notes on standard input:
 
 ```bash
@@ -63,7 +71,7 @@ It prints the notes the last session left for this folder, when it left them, an
 "$SUPERDECK" answer INSTANCE yes    # or no
 ```
 
-`launch` starts Claude under an account in a folder and tells you how it went. Often the new instance stops to ask something first: whether to trust the folder, or whether to turn on Remote Control for the account. **You do not answer these yourself.** They are the user's decisions about their own Mac. Put the question to the user as Superdeck reported it, including the folder's path, and run `answer` only with what they tell you in this conversation. A trust question for a folder the user did not ask you to launch in is a reason to stop and check, not to answer.
+`launch` starts Claude under an account in a folder and tells you how it went. Often the new instance stops to ask something first: whether to trust the folder, or whether to turn on Remote Control for the account. **You do not answer these yourself.** They are the user's decisions about their own Mac. Put the question to the user as Superdeck reported it, including the folder's path, as a yes or no they can tap (see Asking the user), and run `answer` only with what they tell you in this conversation. A trust question for a folder the user did not ask you to launch in is a reason to stop and check, not to answer.
 
 Once it is connected, the user finds it in the Claude app under Code; `status` gives its address.
 

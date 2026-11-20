@@ -353,7 +353,22 @@ func (a *App) launch(account, folder string) (*Run, error) {
 
 // settle waits a little for a new instance to connect or ask something, then
 // says where it stands.
-func (a *App) settle(run *Run) string {
+// appLogin is the sentence a session needs when the instance it has just
+// started or moved belongs to a different Claude login from its own: the
+// Claude app lists only the instances of the login it is signed in as, so the
+// user will not find this one until they switch. Empty when the logins match
+// or either is unknown.
+func (c ctl) appLogin(target string) string {
+	mine, _ := c.a.accountStatusNow(c.get("account"))["email"].(string)
+	theirs, _ := c.a.accountStatusNow(target)["email"].(string)
+	if c.get("account") == "" || mine == "" || theirs == "" || strings.EqualFold(mine, theirs) {
+		return ""
+	}
+	return fmt.Sprintf("\nIt belongs to a different Claude login. The Claude app shows it only while signed in as %s; this session is signed in as %s. Tell the user to switch account in the Claude app to find it.", theirs, mine)
+}
+
+func (c ctl) settle(run *Run) string {
+	a := c.a
 	for deadline := time.Now().Add(settleFor); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
 		if v := run.View(); v.Done || v.Link != "" || v.Hint != "" {
 			break
@@ -369,7 +384,7 @@ func (a *App) settle(run *Run) string {
 	case iv.Do == "question":
 		return fmt.Sprintf("Claude is asking: %s\nAsk the user, then answer with: superdeck answer %s yes   (or no)", strings.TrimSpace(iv.Question), v.ID)
 	case v.Link != "":
-		return "It is connected. In the Claude app it is under Code, or at " + v.Link
+		return "It is connected. In the Claude app it is under Code, or at " + v.Link + c.appLogin(v.Account)
 	case v.Done:
 		return "It stopped straight away: " + strings.TrimSpace(iv.Lede+" "+iv.Detail)
 	}
@@ -391,7 +406,7 @@ func (a *App) ctlLaunch(c ctl) (int, string) {
 	if err != nil {
 		return no("Not launched: %v.", err)
 	}
-	return 200, fmt.Sprintf("Launched %s under %s (id %s).\n%s", filepath.Base(run.Project), a.accountName(to), run.ID, a.settle(run))
+	return 200, fmt.Sprintf("Launched %s under %s (id %s).\n%s", filepath.Base(run.Project), a.accountName(to), run.ID, c.settle(run))
 }
 
 func (a *App) ctlNewFolder(c ctl) (int, string) {
@@ -517,7 +532,7 @@ func (a *App) ctlMove(c ctl) (int, string) {
 	if notes != "" {
 		kept = "Your notes are saved for the next session."
 	}
-	return 200, fmt.Sprintf("Moving %s to %s.%s %s\nThe user should start a new session for this folder in the Claude app and ask it to pick up where this left off. If that account has not worked in this folder before, Claude will first ask whether to trust it; `superdeck status` shows the question.", filepath.Base(run.Project), name, note, kept)
+	return 200, fmt.Sprintf("Moving %s to %s.%s %s\nThe user should start a new session for this folder in the Claude app and ask it to pick up where this left off. If that account has not worked in this folder before, Claude will first ask whether to trust it; `superdeck status` shows the question.%s", filepath.Base(run.Project), name, note, kept, c.appLogin(to))
 }
 
 func (a *App) ctlAnswer(c ctl) (int, string) {
@@ -539,7 +554,7 @@ func (a *App) ctlAnswer(c ctl) (int, string) {
 		return no("That could not be typed: %v.", err)
 	}
 	time.Sleep(answerWait)
-	return 200, "Answered " + v + ".\n" + a.settle(run)
+	return 200, "Answered " + v + ".\n" + c.settle(run)
 }
 
 func (a *App) ctlAddAccount(c ctl) (int, string) {

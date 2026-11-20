@@ -298,3 +298,33 @@ func TestOpeningTheDatabaseTwiceAtOnceUpgradesItOnce(t *testing.T) {
 		}
 	}
 }
+
+// The Claude app lists only the instances of the login it is signed in as. A
+// session that launches under another login has to be told, or the user is
+// left looking for an instance their app will not show.
+func TestLaunchingUnderAnotherLoginSaysToSwitch(t *testing.T) {
+	a := testApp(t)
+	for n, email := range map[string]string{"same": "", "other": "o@example.com"} {
+		dir := filepath.Join(a.state, "accounts", n)
+		os.MkdirAll(dir, 0o700)
+		os.WriteFile(filepath.Join(dir, "in"), nil, 0o600)
+		if email != "" {
+			os.WriteFile(filepath.Join(dir, "email"), []byte(email), 0o600)
+		}
+	}
+	a.serveControl()
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.View().Link != "" })
+
+	out, code := ask(t, a, run, "", "launch", "other", "app")
+	if code != 0 || !strings.Contains(out, "only while signed in as o@example.com; this session is signed in as t@example.com") {
+		t.Errorf("another login: %d %q", code, out)
+	}
+	out, code = ask(t, a, run, "", "launch", "same", "app")
+	if code != 0 || !strings.Contains(out, "connected") || strings.Contains(out, "switch") {
+		t.Errorf("the same login: %d %q", code, out)
+	}
+}
