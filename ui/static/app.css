@@ -197,3 +197,12 @@ input:focus { border-color: var(--amber); outline: none; }
 .ask-buttons.after { margin-top: 22px; }
 
 .actions { display: grid; gap: 10px; max-width: 460px; margin-top: 26px; }
+
+/* the account name is its own edit box: tap it, change it, save */
+.rename { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.rename input { flex: 1; font: 800 30px/1.1 var(--round); letter-spacing: -.02em; padding: 6px 10px; margin-left: -11px; border-color: transparent; background: none; }
+.rename input:hover { border-color: var(--line); }
+.rename input:focus { border-color: var(--amber); background: #0e0c0a; }
+.rename button { display: none; }
+.rename:focus-within button { display: inline-block; }
+@media (min-width: 760px) { .rename input { font-size: 36px; } }

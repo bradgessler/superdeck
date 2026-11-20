@@ -31,7 +31,6 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /accounts/new", a.pageNewAccount)
 	mux.HandleFunc("POST /accounts", a.doNewAccount)
 	mux.HandleFunc("GET /accounts/{id}", a.pageAccount)
-	mux.HandleFunc("GET /accounts/{id}/rename", a.pageRename)
 	mux.HandleFunc("POST /accounts/{id}/rename", a.doRename)
 	mux.HandleFunc("POST /accounts/{id}/signin", a.doSignIn)
 
@@ -432,21 +431,10 @@ func (a *App) doNewAccount(w http.ResponseWriter, r *http.Request) {
 	to(w, r, "/instances/"+run.ID)
 }
 
-func (a *App) pageRename(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, err := a.accountDir(id); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	d := page(r, "Rename account", "accounts")
-	d["ID"], d["Name"] = id, a.accountName(id)
-	render(w, "account-rename.html", d)
-}
-
 func (a *App) doRename(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := a.setName(id, strings.TrimSpace(r.FormValue("name"))); err != nil {
-		fail(w, r, "/accounts/"+url.PathEscape(id)+"/rename", err)
+		fail(w, r, "/accounts/"+url.PathEscape(id), err)
 		return
 	}
 	to(w, r, "/accounts/"+url.PathEscape(id))

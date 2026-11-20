@@ -451,7 +451,7 @@ func TestEveryPageRendersEvenWhenEmpty(t *testing.T) {
 	for _, a := range []*App{empty, testApp(t)} {
 		for _, p := range []string{"/", "/instances", "/new", "/new/folders?q=a", "/folders/new", "/accounts", "/accounts/new"} {
 			if a != empty && p == "/accounts" {
-				for _, sub := range []string{"/accounts/work", "/accounts/idle", "/accounts/work/rename"} {
+				for _, sub := range []string{"/accounts/work", "/accounts/idle"} {
 					if w := do(a, "GET", sub, nil, ""); w.Code != 200 {
 						t.Errorf("GET %s: %d", sub, w.Code)
 					}
@@ -614,4 +614,19 @@ func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
 		}
 		return false
 	})
+}
+
+func TestRenameFromTheAccountScreen(t *testing.T) {
+	a := testApp(t)
+	w := do(a, "POST", "/accounts/work/rename", url.Values{"name": {"overton"}}, same)
+	if w.Code != 303 || w.Header().Get("Location") != "/accounts/work" {
+		t.Fatalf("rename: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if page := do(a, "GET", "/accounts/work", nil, "").Body.String(); !strings.Contains(page, `value="overton"`) {
+		t.Error("new name not shown in the edit box")
+	}
+	w = do(a, "POST", "/accounts/work/rename", url.Values{"name": {"Bad Name"}}, same)
+	if !strings.HasPrefix(w.Header().Get("Location"), "/accounts/work?error=") {
+		t.Errorf("bad name: %q", w.Header().Get("Location"))
+	}
 }
