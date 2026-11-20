@@ -1,29 +1,33 @@
 ---
 name: superdeck
-description: Move this work to another Claude account on this Mac, or pick up work that was handed over from another account. Use when the user asks to move, switch or change accounts, says this account is out of usage or rate limited, or asks to continue, resume or pick up where another account or an earlier session left off.
+description: Run Superdeck, the launcher that started this Claude session, on the user's Mac. Use when the user asks to move this work to another Claude account, says an account is out of usage or rate limited, asks to pick up where another account or an earlier session left off, or asks to see what is running, launch Claude in another folder, make a new project folder, stop or relaunch an instance, add a Claude account or sign one in.
 ---
 
 # Superdeck
 
-This session was started by Superdeck, a launcher on this Mac that runs Claude under one of several Claude accounts. Each account has its own usage. Superdeck can move the work in this folder to another account. You talk to it with one command, whose path is in `$SUPERDECK`.
+This session was started by Superdeck, a launcher on this Mac. It runs Claude under one of several Claude accounts, each with its own usage, one "instance" per account and folder. The user normally works it from a web page. You can work it for them with one command, whose path is in `$SUPERDECK`. Everything below is that command.
 
 If `$SUPERDECK` is empty, this session was started before Superdeck could be reached from inside it. Say so, and ask the user to relaunch this instance from the Superdeck page.
 
-## Seeing the accounts
+Do these things when the user asks for them, not on your own initiative. Each one changes what is running on their Mac.
+
+## Looking
 
 ```bash
+"$SUPERDECK" status
 "$SUPERDECK" accounts
+"$SUPERDECK" folders [WORD]
 ```
 
-Lists the accounts, which one this session is running under, and which are signed in. Only a signed-in account can take the work. Use the names exactly as listed.
+`status` lists the instances, marks the one this session is in, and shows anything waiting on a person, with the command that answers it. `accounts` shows which accounts are signed in; only those can run anything. `folders` lists where Claude can be launched. Use account and folder names as these list them.
 
-## Moving to another account
+## Moving this work to another account
 
 Moving stops this instance and starts it again under the other account. **This conversation ends when that happens**, and it cannot be carried across: it belongs to this account. What carries the work across is the state of the files and the notes you leave. So, in this order:
 
 1. If the user did not say which account, run `"$SUPERDECK" accounts` and ask.
 2. Finish or park what you are doing. In a Git repository, commit work in progress on the current branch (a commit marked WIP is fine). Do not push unless the user asked.
-3. Tell the user, in one or two sentences, that you are moving the work now, that this conversation will end, and that they should start a new session for this folder in the Claude app and ask it to pick up where this left off. If the other account has not worked in this folder before, mention that Superdeck's page will show a one-time question about trusting the folder, which they need to answer there first. Say this before the command: you will not get to say anything after it.
+3. Tell the user, in one or two sentences, that you are moving the work now, that this conversation will end, and that they should start a new session for this folder in the Claude app and ask it to pick up where this left off. If the other account has not worked in this folder before, add that Claude will first ask whether to trust the folder, and that the new session's first job is to put that question to them. Say all this before the command: you will not get to say anything after it.
 4. Run the move as your last action, with handoff notes on standard input:
 
 ```bash
@@ -51,7 +55,41 @@ When the user asks you to continue or pick up where things left off, or you star
 
 It prints the notes the last session left for this folder, when it left them, and the directory it was working in. That directory may be a different Git worktree of this repository from yours, holding the branch with its work: check it out or merge it rather than starting again. Read the notes, check them against the actual state of the files and `git log`, tell the user in a few lines where things stand, then carry on from the next step. If there are no notes, say so and ask what to do.
 
+## Launching, and questions Claude asks
+
+```bash
+"$SUPERDECK" launch ACCOUNT FOLDER
+"$SUPERDECK" folder NAME            # a new, empty Git repository to launch in
+"$SUPERDECK" answer INSTANCE yes    # or no
+```
+
+`launch` starts Claude under an account in a folder and tells you how it went. Often the new instance stops to ask something first: whether to trust the folder, or whether to turn on Remote Control for the account. **You do not answer these yourself.** They are the user's decisions about their own Mac. Put the question to the user as Superdeck reported it, including the folder's path, and run `answer` only with what they tell you in this conversation. A trust question for a folder the user did not ask you to launch in is a reason to stop and check, not to answer.
+
+Once it is connected, the user finds it in the Claude app under Code; `status` gives its address.
+
+## Stopping and relaunching
+
+```bash
+"$SUPERDECK" relaunch [INSTANCE]
+"$SUPERDECK" stop [INSTANCE]
+```
+
+Both end every Claude session the instance is hosting, so say that and get a clear yes first. With no instance named they act on the one this session is in, which ends this conversation a few seconds later: say what you need to say before the command. A stopped instance stays stopped until someone launches it again. `relaunch` is how an instance picks up a new version of Claude.
+
+## Adding an account, and signing in
+
+```bash
+"$SUPERDECK" account add NAME      # lowercase letters, digits and dashes
+"$SUPERDECK" signin ACCOUNT        # sign an existing account in again
+"$SUPERDECK" code ACCOUNT CODE
+```
+
+`account add` and `signin` print the address of a sign-in page on Anthropic's site. Give the user that address exactly as printed, and tell them to open it in a browser that is signed in to the Claude account they want this one to use; if their browser is signed in to a different Claude account, a private window lets them choose. The page shows them a code. When they send you the code, run `code` with it. Never ask for a password, and never make up or guess a code. A sign-in left alone is cancelled after 15 minutes.
+
+Each account should be a different Claude login. Two accounts signed in as the same person share the same usage, so moving between them gains nothing; if `accounts` shows the same address twice, say so.
+
 ## Limits
 
-- You can move this instance only. Launching, stopping, signing in and everything else is done by a person on the Superdeck page.
-- Do not move to get around a limit the user has not asked you to get around. Move when the user asks.
+- Removing an account, renaming one and updating Claude are done on the Superdeck page, not from here.
+- Superdeck refuses anything outside the folders its owner allowed, and limits how many instances and accounts there can be. When it refuses, it says why and changes nothing: pass that on, do not look for a way around it.
+- Do not move, launch or sign in to get around a usage limit the user has not asked you to get around.

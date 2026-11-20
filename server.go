@@ -99,8 +99,10 @@ func main() {
 			os.Exit(holdMain(os.Args[2:]))
 		case "attach":
 			os.Exit(attachMain(filepath.Join(home, ".superdeck"), os.Args[2:]))
-		case "accounts", "move", "handoff": // run by Claude inside an instance; see control.go
-			os.Exit(controlMain(os.Args[1], os.Args[2:], os.Stdin, os.Stdout))
+		default: // commands to the running Superdeck; see control.go
+			if _, ok := controlCommands[os.Args[1]]; ok {
+				os.Exit(controlMain(filepath.Join(home, ".superdeck"), os.Args[1], os.Args[2:], os.Stdin, os.Stdout))
+			}
 		}
 	}
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
@@ -109,7 +111,13 @@ func main() {
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
 	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Superdeck at login with these settings, then exit")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: superdeck [flags] FOLDER...\n       superdeck attach [ID]\n\n"+
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: superdeck [flags] FOLDER...\n       superdeck attach [ID]\n       superdeck COMMAND ...   to a Superdeck that is running:\n")
+		var lines []string
+		for _, l := range controlCommands {
+			lines = append(lines, "         "+l)
+		}
+		sort.Strings(lines)
+		fmt.Fprintf(flag.CommandLine.Output(), strings.Join(lines, "\n")+"\n\n"+
 			"Each FOLDER is a place Superdeck may launch Claude in, along with the\n"+
 			"folders inside it. Glob patterns work too, for example ~/Projects/acme-*.\n\nflags:\n")
 		flag.PrintDefaults()

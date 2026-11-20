@@ -31,7 +31,7 @@ These came from the person who owns this project. Treat them as requirements.
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
 | `hold.go` | the holder: a detached copy of this binary that keeps one Claude process alive, and `superdeck attach` |
 | `proc.go` | Superdeck's side of a held process: polling it, emulating its terminal, prompt detection |
-| `control.go` | how a Claude session reaches Superdeck: the local socket, `superdeck move`, handoff notes, installing the skill |
+| `control.go` | how a Claude session (or a terminal) drives Superdeck: the local socket, the `superdeck COMMAND` set, handoff notes, installing the skill |
 | `skill/SKILL.md` | the skill given to every instance, compiled into the binary. This is a prompt: edit it with the care you would give code |
 | `paths.go` | allowed folders, folder listing, path confinement |
 | `store.go` | the SQLite store and migration runner |
@@ -50,6 +50,7 @@ go test -race ./...
 go build -o superdeck . && ./superdeck ~/Projects
 ```
 
+- A new thing the page can do should usually get a command in `control.go` and a paragraph in `skill/SKILL.md` too, going through the same function as the page's handler so the checks cannot differ. Removing an account is left out on purpose.
 - Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
 - `chaos_test.go` puts two instances through forty random failures (Claude killed, holder killed or frozen, socket deleted, Superdeck replaced) and checks each is running exactly once afterwards. Run it several times after touching `hold.go`, `proc.go` or the restart rules: `go test -race -count=10 -run RandomFailures ./...`. Add a case when you find a new way for things to fail.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
