@@ -10,6 +10,15 @@ package main
 // it keeps the last part of the raw output in memory and hands it over on
 // request. Everything that could go wrong with parsing happens in Superdeck,
 // where a failure cannot take Claude down.
+//
+// Rules for changing this file:
+//
+//   - Nothing a client does may stall the holder. No write to a client
+//     happens while h.mu is held, and every client has a deadline or a
+//     bounded queue.
+//   - Holders outlive Superdeck, so a new Superdeck must understand holders
+//     started by an older one. Add verbs and reply fields; never change the
+//     meaning of existing ones. holdProtocol says which a holder speaks.
 
 import (
 	"bufio"
@@ -34,13 +43,18 @@ import (
 	"golang.org/x/term"
 )
 
-const holdBuffer = 512 << 10 // how much raw output a holder keeps
+const (
+	holdBuffer   = 512 << 10 // how much raw output a holder keeps
+	holdProtocol = 1
+)
 
 // holdReply is the first line of a holder's answer to "snap".
 type holdReply struct {
+	V     int   `json:"v"` // protocol version
 	Alive bool  `json:"alive"`
 	Code  int   `json:"code"`
-	Pid   int   `json:"pid"`
+	Pid   int   `json:"pid"`   // the Claude process
+	Hpid  int   `json:"hpid"`  // the holder itself
 	Seq   int64 `json:"seq"`   // total bytes printed so far
 	Reset bool  `json:"reset"` // the bytes that follow are everything kept, not a continuation
 	N     int   `json:"n"`     // how many raw bytes follow
@@ -52,6 +66,13 @@ type holdExit struct {
 	Code int `json:"code"`
 }
 
+// stream is one attached terminal. Output for it waits in a bounded queue; a
+// viewer that falls behind is dropped rather than waited for.
+type stream struct {
+	c net.Conn
+	q chan []byte
+}
+
 type holder struct {
 	mu      sync.Mutex
 	buf     []byte
@@ -60,20 +81,35 @@ type holder struct {
 	code    int
 	cmd     *exec.Cmd
 	tty     *os.File
-	streams map[net.Conn]struct{}
+	streams map[*stream]struct{}
 }
 
 // holdMain is the entry point for `superdeck hold`. It is not for people.
-func holdMain(args []string) int {
+func holdMain(args []string) (status int) {
 	fs := flag.NewFlagSet("hold", flag.ContinueOnError)
 	sock := fs.String("socket", "", "")
 	dir := fs.String("dir", "", "")
+	logPath := fs.String("log", "", "")
 	cols := fs.Int("cols", 200, "")
 	rows := fs.Int("rows", 50, "")
 	if err := fs.Parse(args); err != nil || *sock == "" || fs.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "superdeck hold is used by Superdeck itself")
 		return 2
 	}
+	// A holder's own failures must leave a trace somewhere.
+	say := func(format string, a ...any) {}
+	if *logPath != "" {
+		if f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			defer f.Close()
+			id := strings.TrimSuffix(filepath.Base(*sock), ".sock")
+			say = func(format string, a ...any) {
+				fmt.Fprintf(f, "%s holder %s: %s\n", time.Now().Format("2006/01/02 15:04:05"), id, fmt.Sprintf(format, a...))
+			}
+			// A Go panic prints to standard error; send that to the log too.
+			syscall.Dup2(int(f.Fd()), 2)
+		}
+	}
+
 	// A holder must outlive whatever started it, so it shrugs off hang-ups.
 	// They are caught and dropped rather than ignored: an ignored signal is
 	// inherited by the process the holder starts, and Claude must still die
@@ -85,15 +121,14 @@ func holdMain(args []string) int {
 		}
 	}()
 
-	h := &holder{alive: true, streams: map[net.Conn]struct{}{}}
+	h := &holder{alive: true, streams: map[*stream]struct{}{}}
 	os.Remove(*sock)
 	ln, err := net.Listen("unix", *sock)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		say("cannot listen: %v", err)
 		return 1
 	}
 	os.Chmod(*sock, 0o600)
-	defer os.Remove(*sock)
 
 	argv := fs.Args()
 	h.cmd = exec.Command(argv[0], argv[1:]...)
@@ -103,7 +138,10 @@ func holdMain(args []string) int {
 	if err != nil {
 		// Say why in the output, so the failure is visible where output is shown.
 		h.write([]byte("could not start: " + err.Error() + "\r\n"))
+		say("could not start %s: %v", argv[0], err)
 		h.finish(*sock, 127)
+		ln.Close()
+		os.Remove(*sock)
 		return 1
 	}
 
@@ -113,57 +151,78 @@ func holdMain(args []string) int {
 		<-term
 		h.stop()
 	}()
-	go h.serve(ln)
+	go h.serve(ln, say)
 
-	b := make([]byte, 16<<10)
-	for {
-		n, err := h.tty.Read(b)
-		if n > 0 {
-			h.write(b[:n])
+	// Wait for the process itself, not only for its terminal to close: a
+	// background process it leaves behind can keep the terminal open, and the
+	// instance must not look alive because of that.
+	exited := make(chan int, 1)
+	go func() {
+		code := 0
+		if err := h.cmd.Wait(); err != nil {
+			code = -1
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				code = ee.ExitCode()
+			}
 		}
-		if err != nil {
-			break
+		exited <- code
+	}()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		b := make([]byte, 16<<10)
+		for {
+			n, err := h.tty.Read(b)
+			if n > 0 {
+				h.write(b[:n])
+			}
+			if err != nil {
+				return
+			}
 		}
-	}
-	code := 0
-	if err := h.cmd.Wait(); err != nil {
-		code = -1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		}
+	}()
+	code := <-exited
+	select { // let the last of its output arrive
+	case <-drained:
+	case <-time.After(time.Second):
 	}
 	h.tty.Close()
 	h.finish(*sock, code)
 	ln.Close()
+	os.Remove(*sock)
 	return 0
 }
 
 func (h *holder) write(b []byte) {
+	chunk := append([]byte(nil), b...)
 	h.mu.Lock()
-	h.buf = append(h.buf, b...)
+	h.buf = append(h.buf, chunk...)
 	if len(h.buf) > holdBuffer {
 		h.buf = append([]byte(nil), h.buf[len(h.buf)-holdBuffer:]...)
 	}
-	h.seq += int64(len(b))
-	for c := range h.streams {
-		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, err := c.Write(b); err != nil {
-			c.Close()
-			delete(h.streams, c)
+	h.seq += int64(len(chunk))
+	for s := range h.streams {
+		select {
+		case s.q <- chunk:
+		default: // this viewer is not keeping up; let it go
+			delete(h.streams, s)
+			close(s.q)
 		}
 	}
 	h.mu.Unlock()
 }
 
 // finish records how the process ended: its output and exit code are written
-// beside the socket before the holder goes away.
+// beside the socket before the holder goes away. The output is written first,
+// so an exit record always has its output with it.
 func (h *holder) finish(sock string, code int) {
 	h.mu.Lock()
 	h.alive, h.code = false, code
 	out := append([]byte(nil), h.buf...)
-	for c := range h.streams {
-		c.Close()
+	for s := range h.streams {
+		delete(h.streams, s)
+		close(s.q)
 	}
 	h.mu.Unlock()
 	base := strings.TrimSuffix(sock, ".sock")
@@ -201,11 +260,18 @@ func (h *holder) stop() {
 	}()
 }
 
-func (h *holder) serve(ln net.Listener) {
+func (h *holder) serve(ln net.Listener, say func(string, ...any)) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Running out of file descriptors, say, must not end the service:
+			// Superdeck would take the silence for a dead holder.
+			say("accept: %v", err)
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
 		go h.handle(c)
 	}
@@ -219,11 +285,11 @@ func (h *holder) serve(ln net.Listener) {
 //	attach         a live two-way stream, for `superdeck attach`
 func (h *holder) handle(c net.Conn) {
 	defer func() { recover() }()
+	defer c.Close()
 	c.SetDeadline(time.Now().Add(10 * time.Second))
 	r := bufio.NewReader(io.LimitReader(c, 64<<10))
 	line, err := r.ReadString('\n')
 	if err != nil {
-		c.Close()
 		return
 	}
 	verb, arg, _ := strings.Cut(strings.TrimSpace(line), " ")
@@ -231,7 +297,7 @@ func (h *holder) handle(c net.Conn) {
 	case "snap":
 		since, _ := strconv.ParseInt(arg, 10, 64)
 		h.mu.Lock()
-		rep := holdReply{Alive: h.alive, Code: h.code, Seq: h.seq}
+		rep := holdReply{V: holdProtocol, Alive: h.alive, Code: h.code, Seq: h.seq, Hpid: os.Getpid()}
 		if h.cmd != nil && h.cmd.Process != nil {
 			rep.Pid = h.cmd.Process.Pid
 		}
@@ -255,37 +321,74 @@ func (h *holder) handle(c net.Conn) {
 		h.mu.Unlock()
 		if err != nil || !alive {
 			fmt.Fprintln(c, "no")
-			break
+			return
 		}
-		if _, err := h.tty.Write(b); err != nil {
+		// Typing can block if the process is not reading. Do not let that
+		// hold this connection past its deadline.
+		done := make(chan error, 1)
+		go func() { _, err := h.tty.Write(b); done <- err }()
+		select {
+		case err := <-done:
+			if err != nil {
+				fmt.Fprintln(c, "no")
+				return
+			}
+			fmt.Fprintln(c, "ok")
+		case <-time.After(5 * time.Second):
 			fmt.Fprintln(c, "no")
-			break
 		}
-		fmt.Fprintln(c, "ok")
 	case "stop":
 		h.stop()
 		fmt.Fprintln(c, "ok")
 	case "attach":
 		c.SetDeadline(time.Time{})
+		s := &stream{c: c, q: make(chan []byte, 256)}
 		h.mu.Lock()
-		c.Write(h.buf)
+		backlog := append([]byte(nil), h.buf...)
 		alive := h.alive
 		if alive {
-			h.streams[c] = struct{}{}
+			h.streams[s] = struct{}{}
 		}
 		h.mu.Unlock()
 		if !alive {
-			break
+			c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			c.Write(backlog)
+			return
 		}
-		io.Copy(h.tty, c) // what the person types
+		// The viewer's writer: everything it is sent goes through here, with
+		// a deadline, and never while the holder's lock is held.
+		go func() {
+			send := func(b []byte) bool {
+				c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_, err := c.Write(b)
+				return err == nil
+			}
+			ok := send(backlog)
+			for b := range s.q {
+				if ok {
+					ok = send(b)
+				}
+			}
+			c.Close()
+		}()
+		io.Copy(h.tty, c) // what the person types, until they detach
 		h.mu.Lock()
-		delete(h.streams, c)
+		if _, on := h.streams[s]; on {
+			delete(h.streams, s)
+			close(s.q)
+		}
 		h.mu.Unlock()
 	}
-	c.Close()
 }
 
 // ---- the client side, used by Superdeck ----
+
+// holdGone reports whether an error from talking to a holder means the holder
+// is definitely not there (nothing is listening on its socket), as opposed to
+// merely slow or busy. Only this may be taken as evidence that it has died.
+func holdGone(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) || errors.Is(err, os.ErrNotExist)
+}
 
 func holdDial(sock string) (net.Conn, error) {
 	c, err := net.DialTimeout("unix", sock, 2*time.Second)
@@ -332,28 +435,40 @@ func holdSay(sock, line string) error {
 	fmt.Fprintln(c, line)
 	ans, _ := bufio.NewReader(c).ReadString('\n')
 	if strings.TrimSpace(ans) != "ok" {
-		return errors.New("that process has already exited")
+		return errors.New("that process is not accepting input right now")
 	}
 	return nil
 }
 
-// attachMain is `superdeck attach ID`: it connects this terminal to a running
-// process, for looking at it or typing into it from the Mac itself.
-func attachMain(state string, args []string) int {
-	dir := runDir(state)
-	if len(args) == 0 {
+// attachMain is `superdeck attach [-state DIR] [ID]`: it connects this
+// terminal to a running process, for looking at it or typing into it from the
+// Mac itself.
+func attachMain(defaultState string, args []string) int {
+	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+	state := fs.String("state", defaultState, "Superdeck's state directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	dir := runDir(*state)
+	if fs.NArg() == 0 {
 		socks, _ := filepath.Glob(filepath.Join(dir, "*.sock"))
-		if len(socks) == 0 {
+		var live []string
+		for _, s := range socks {
+			if _, _, err := holdSnap(s, 1<<62); err == nil {
+				live = append(live, strings.TrimSuffix(filepath.Base(s), ".sock"))
+			}
+		}
+		if len(live) == 0 {
 			fmt.Println("Nothing is running.")
 			return 0
 		}
 		fmt.Println("Running processes. Attach with: superdeck attach ID")
-		for _, s := range socks {
-			fmt.Println("  " + strings.TrimSuffix(filepath.Base(s), ".sock"))
+		for _, id := range live {
+			fmt.Println("  " + id)
 		}
 		return 0
 	}
-	id := filepath.Base(args[0])
+	id := filepath.Base(fs.Arg(0))
 	c, err := net.DialTimeout("unix", filepath.Join(dir, id+".sock"), 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "superdeck: nothing is running with id %s\n", id)

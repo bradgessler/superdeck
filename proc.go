@@ -11,6 +11,7 @@ import (
 	"html"
 	"html/template"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,13 +26,19 @@ import (
 )
 
 const (
-	maxRunning = 16
+	maxRunning = 16  // instances
+	maxLogins  = 3   // sign-ins in progress; kept apart so they cannot crowd out instances
 	termCols   = 200 // wide, so Claude never breaks a link or path across lines
 	termRows   = 50
 )
 
-// pollEvery is how often a process's output and state are read from its holder.
-var pollEvery = 400 * time.Millisecond
+// pollEvery is how often a process's output and state are read from its
+// holder. startGrace is how long a new process gets before a missing holder
+// is believed. Tests shorten both.
+var (
+	pollEvery  = 400 * time.Millisecond
+	startGrace = 5 * time.Second
+)
 
 var (
 	urlRe     = regexp.MustCompile(`https://[^\s"'<>]+`)
@@ -64,15 +71,36 @@ func childEnv(configDir string) []string {
 }
 
 // runDir is where holders keep their sockets and exit records. Unix socket
-// paths have a short length limit, so a long state path falls back to /tmp.
+// paths have a short length limit, so a long state path falls back to the
+// user's own temporary directory.
 func runDir(state string) string {
 	dir := filepath.Join(state, "run")
 	if len(dir) > 70 {
 		sum := sha256.Sum256([]byte(state))
-		dir = "/tmp/superdeck-" + hex.EncodeToString(sum[:6])
+		dir = filepath.Join(os.TempDir(), "superdeck-"+hex.EncodeToString(sum[:6]))
 	}
 	return dir
 }
+
+// ensureRunDir creates the socket directory and refuses one that somebody
+// else could have set up: it must be a real directory, owned by this user,
+// and closed to everyone else.
+func ensureRunDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || !ok || int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not a directory owned by you; refusing to use it", dir)
+	}
+	return os.Chmod(dir, 0o700)
+}
+
+func processAlive(pid int) bool { return pid > 1 && syscall.Kill(pid, 0) == nil }
 
 // Run is one claude process. It is kept alive by a holder (see hold.go), not
 // by Superdeck, so it carries on while Superdeck restarts. Superdeck reads its
@@ -96,17 +124,24 @@ type Run struct {
 	mgr      *Manager
 	onExit   func(*Run)
 
-	mu       sync.Mutex
-	vt       vt10x.Terminal
-	vtBroken bool   // the emulator choked on this output; fall back to plain text
-	raw      []byte // recent raw output, for that fallback
-	seq      int64  // how much of the holder's output has been read
-	pid      int
-	text     string // what is on the screen, as plain text
-	link     string // where Claude says this instance can be opened
-	stopped  bool   // someone asked for this process to stop
-	done     bool
-	exitCode int
+	readMu sync.Mutex // one reader at a time; see read
+
+	mu        sync.Mutex
+	fails     int       // polls in a row that found nothing listening
+	hpid      int       // the holder's own process id
+	ended     time.Time // when it was found to have exited
+	restartAt time.Time // when an automatic restart is due, if one is
+	next      string    // id of the run that replaced this one
+	vt        vt10x.Terminal
+	vtBroken  bool   // the emulator choked on this output; fall back to plain text
+	raw       []byte // recent raw output, for that fallback
+	seq       int64  // how much of the holder's output has been read
+	pid       int
+	text      string // what is on the screen, as plain text
+	link      string // where Claude says this instance can be opened
+	stopped   bool   // someone asked for this process to stop
+	done      bool
+	exitCode  int
 }
 
 func (r *Run) sock() string { return filepath.Join(r.mgr.dir, r.ID+".sock") }
@@ -121,6 +156,11 @@ type RunView struct {
 	Question string // Claude's own words, for a yes/no question this program does not know
 	URL      string // sign-in page, for a login that is waiting
 	Link     string // claude.ai address of a connected instance
+	Ended    time.Time
+	// RestartAt is when an automatic restart is due; Next is the run that
+	// replaced this one once it happened.
+	RestartAt time.Time
+	Next      string
 }
 
 // lastLines returns up to n trailing non-empty lines of text.
@@ -140,7 +180,8 @@ func lastLines(text string, n int) string {
 func (r *Run) View() RunView {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped}
+	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped,
+		Ended: r.ended, RestartAt: r.restartAt, Next: r.next}
 	// What matters is what is on the screen now, at the bottom: a question is
 	// only a question while it is the last thing Claude printed. An earlier,
 	// answered question may still be visible above it, so the kind of
@@ -160,14 +201,46 @@ func (r *Run) View() RunView {
 		v.Hint = "needs-login"
 	}
 	if r.Kind == "login" && !r.done {
-		if m := urlRe.FindAllString(r.text, -1); len(m) > 0 {
-			v.URL = m[len(m)-1]
-		}
+		v.URL = signInURL(r.text)
 	}
 	if !r.done {
 		v.Link = r.link
 	}
 	return v
+}
+
+// signInURL finds Anthropic's sign-in address in a process's output. Only an
+// https address on one of Anthropic's own domains counts: the page offers it
+// as a button, so it must not be whatever link happened to be printed.
+func signInURL(text string) string {
+	found := ""
+	for _, raw := range urlRe.FindAllString(text, -1) {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" {
+			continue
+		}
+		host := strings.ToLower(u.Hostname())
+		for _, d := range []string{"claude.ai", "claude.com", "anthropic.com"} {
+			if host == d || strings.HasSuffix(host, "."+d) {
+				found = raw
+			}
+		}
+	}
+	return found
+}
+
+// setRestart records that an automatic restart is due at t (zero clears it).
+func (r *Run) setRestart(t time.Time) {
+	r.mu.Lock()
+	r.restartAt = t
+	r.mu.Unlock()
+}
+
+// setNext records the run that replaced this one.
+func (r *Run) setNext(id string) {
+	r.mu.Lock()
+	r.next, r.restartAt = id, time.Time{}
+	r.mu.Unlock()
 }
 
 // Tail is what is on the process's screen, as plain text.
@@ -224,9 +297,16 @@ func (r *Run) Stop() {
 	if r.mgr.onStop != nil {
 		r.mgr.onStop(r)
 	}
-	if r.alive() {
-		holdSay(r.sock(), "stop")
-	}
+	// A stop must not be lost because the holder was busy, or had not quite
+	// started yet. Keep asking until it has heard or the process is gone.
+	go func() {
+		for i := 0; i < 60 && r.alive(); i++ {
+			if holdSay(r.sock(), "stop") == nil {
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}()
 }
 
 // feed passes output to the terminal emulator. The emulator is third-party
@@ -284,46 +364,33 @@ func (r *Run) screenText() (text string) {
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
+// end marks the run as exited. Call with r.mu held.
+func (r *Run) end(code int) {
+	r.done, r.exitCode, r.ended = true, code, time.Now()
+}
+
 // read refreshes this run's state from its holder. It returns false once the
-// process has exited.
+// process has exited. Only one read runs at a time: two interleaved readers
+// would each replay the same output into the emulator.
 func (r *Run) read() bool {
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
 	r.mu.Lock()
-	since := r.seq
+	since, done := r.seq, r.done
 	r.mu.Unlock()
+	if done {
+		return false
+	}
 	rep, data, err := holdSnap(r.sock(), since)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.done {
-		return false
-	}
 	if err != nil {
-		// The holder is not answering. If it left an exit record, the process
-		// ended normally; otherwise holder and process are simply gone, as
-		// after a reboot.
-		code := -1
-		base := strings.TrimSuffix(r.sock(), ".sock")
-		if b, ferr := os.ReadFile(base + ".exit"); ferr == nil {
-			var e holdExit
-			if json.Unmarshal(b, &e) == nil {
-				code = e.Code
-			}
-			if out, oerr := os.ReadFile(base + ".out"); oerr == nil {
-				r.feed(out, true)
-				r.text = r.screenText()
-			}
-		} else if time.Since(r.Started) < 3*time.Second {
-			return true // still starting up; its socket is not there yet
-		} else if r.pid > 1 {
-			// The holder died without a word. Make sure the process it was
-			// holding does not live on unsupervised beside its replacement.
-			syscall.Kill(-r.pid, syscall.SIGTERM)
-		}
-		r.done, r.exitCode = true, code
-		return false
+		return r.unreachable(err)
 	}
+	r.fails = 0
 	r.feed(data, rep.Reset)
-	r.seq, r.pid = rep.Seq, rep.Pid
+	r.seq, r.pid, r.hpid = rep.Seq, rep.Pid, rep.Hpid
 	r.text = r.screenText()
 	if r.Kind == "server" {
 		if m := linkRe.FindAllString(r.text, -1); len(m) > 0 {
@@ -331,10 +398,56 @@ func (r *Run) read() bool {
 		}
 	}
 	if !rep.Alive {
-		r.done, r.exitCode = true, rep.Code
+		r.end(rep.Code)
 		return false
 	}
 	return true
+}
+
+// unreachable decides what a failed poll means. It errs heavily towards "the
+// process is fine": a holder that is slow, busy or briefly unreachable must
+// never cost a healthy Claude its life. Call with r.mu held.
+func (r *Run) unreachable(err error) bool {
+	base := strings.TrimSuffix(r.sock(), ".sock")
+	// An exit record means it ended in an orderly way and says how.
+	if b, ferr := os.ReadFile(base + ".exit"); ferr == nil {
+		code := -1
+		var e holdExit
+		if json.Unmarshal(b, &e) == nil {
+			code = e.Code
+		}
+		if out, oerr := os.ReadFile(base + ".out"); oerr == nil {
+			r.feed(out, true)
+			r.text = r.screenText()
+		}
+		r.end(code)
+		return false
+	}
+	// A timeout or any other error says nothing about whether it is alive.
+	if !holdGone(err) {
+		return true
+	}
+	// Nothing is listening on its socket. Believe that only after several
+	// polls in a row, and not while it is still starting.
+	r.fails++
+	if r.fails < 4 || time.Since(r.Started) < startGrace {
+		return true
+	}
+	// The holder is still running but cannot be reached (its socket was
+	// removed, say). Ask it to shut down in an orderly way; it will leave an
+	// exit record, which the check above then picks up.
+	if processAlive(r.hpid) && r.fails < 40 {
+		syscall.Kill(r.hpid, syscall.SIGTERM)
+		return true
+	}
+	// The holder is gone and left no record: it crashed, or the Mac
+	// restarted. Make sure the process it held does not live on unsupervised
+	// beside its replacement.
+	if processAlive(r.pid) {
+		syscall.Kill(-r.pid, syscall.SIGTERM)
+	}
+	r.end(-1)
+	return false
 }
 
 // watch follows a process until it exits.
@@ -453,25 +566,62 @@ func (r *Run) Screen() (out template.HTML) {
 // Manager owns every Run. It only ever starts the fixed command shapes built
 // in instances.go; no request can hand it a command.
 type Manager struct {
-	self    string     // this program, re-run as `superdeck hold`
-	dir     string     // where holders keep their sockets
-	onStart func(*Run) // record a new process
-	onStop  func(*Run) // record that a person stopped one
-	onEnd   func(*Run) // record that one exited
+	self    string           // this program, re-run as `superdeck hold`
+	dir     string           // where holders keep their sockets
+	log     string           // where holders write their own errors
+	onStart func(*Run) error // record a new process; an error cancels the launch
+	onStop  func(*Run)       // record that a person stopped one
+	onEnd   func(*Run)       // record that one exited
 
 	mu   sync.Mutex
 	runs map[string]*Run
 }
 
 func NewManager(self, state string) *Manager {
-	return &Manager{self: self, dir: runDir(state), runs: map[string]*Run{}}
+	return &Manager{self: self, dir: runDir(state), log: filepath.Join(state, "holders.log"), runs: map[string]*Run{}}
 }
 
-// Holding reports whether a holder is still answering for this run.
-func (m *Manager) Holding(r *Run) bool {
+// Probe asks about a run that was started before Superdeck restarted:
+// "held" (still being kept alive), "ended" (it exited and left a record, with
+// its exit code) or "gone" (nothing is there). An unreachable holder that
+// cannot be shown to be gone counts as held.
+func (m *Manager) Probe(r *Run) (state string, code int) {
 	r.mgr = m
 	_, _, err := holdSnap(r.sock(), 1<<62)
-	return err == nil
+	if err == nil {
+		return "held", 0
+	}
+	base := strings.TrimSuffix(r.sock(), ".sock")
+	if b, ferr := os.ReadFile(base + ".exit"); ferr == nil {
+		var e holdExit
+		code = -1
+		if json.Unmarshal(b, &e) == nil {
+			code = e.Code
+		}
+		return "ended", code
+	}
+	if holdGone(err) {
+		return "gone", -1
+	}
+	return "held", 0
+}
+
+// Forget removes whatever a finished holder left on disk.
+func (m *Manager) Forget(id string) {
+	base := filepath.Join(m.dir, id)
+	for _, ext := range []string{".exit", ".out", ".sock", ".exit.tmp", ".out.tmp"} {
+		os.Remove(base + ext)
+	}
+}
+
+// Sockets lists the ids of every holder socket on disk.
+func (m *Manager) Sockets() []string {
+	socks, _ := filepath.Glob(filepath.Join(m.dir, "*.sock"))
+	var ids []string
+	for _, s := range socks {
+		ids = append(ids, strings.TrimSuffix(filepath.Base(s), ".sock"))
+	}
+	return ids
 }
 
 func (m *Manager) Get(id string) *Run {
@@ -497,23 +647,36 @@ func (m *Manager) List() []RunView {
 }
 
 // check refuses a second live run of the same kind for the same account and
-// directory, so one account cannot run two servers over one working tree.
+// directory, so one account cannot run two servers over one working tree, and
+// enforces the limits. Call with m.mu held.
 func (m *Manager) check(r *Run) error {
-	live := 0
+	servers, logins := 0, 0
 	for id, o := range m.runs {
-		if !o.alive() {
-			if time.Since(o.Started) > 24*time.Hour {
+		v := o.View()
+		if v.Done {
+			// Forget finished runs a day after they finished, not a day
+			// after they started: a long-lived instance that just crashed
+			// must stay visible.
+			if !v.Ended.IsZero() && time.Since(v.Ended) > 24*time.Hour && v.RestartAt.IsZero() {
 				delete(m.runs, id)
 			}
 			continue
 		}
-		live++
+		switch o.Kind {
+		case "server":
+			servers++
+		case "login":
+			logins++
+		}
 		if o.Kind == r.Kind && o.Account == r.Account && o.dir == r.dir {
 			return errors.New("that is already running")
 		}
 	}
-	if live >= maxRunning {
-		return errors.New("too many things are running; stop one first")
+	if r.Kind == "server" && servers >= maxRunning {
+		return errors.New("too many instances are running; stop one first")
+	}
+	if r.Kind == "login" && logins >= maxLogins {
+		return errors.New("too many sign-ins are in progress; finish or cancel one first")
 	}
 	return nil
 }
@@ -523,28 +686,42 @@ func (m *Manager) check(r *Run) error {
 // given argv as separate arguments and env as its whole environment; no shell
 // is involved.
 func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check(r); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(m.dir, 0o700); err != nil {
-		return err
-	}
 	idb := make([]byte, 6)
 	rand.Read(idb)
 	r.ID = hex.EncodeToString(idb)
 	r.Started = time.Now()
 	r.mgr, r.onExit = m, onExit
 
-	args := append([]string{"hold", "-socket", r.sock(), "-dir", r.dir,
+	// Reserve its place under the lock, then do the slow part without it, so
+	// that pages keep loading while a process starts.
+	m.mu.Lock()
+	err := m.check(r)
+	if err == nil {
+		err = ensureRunDir(m.dir)
+	}
+	if err == nil {
+		m.runs[r.ID] = r
+	}
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		m.mu.Lock()
+		delete(m.runs, r.ID)
+		m.mu.Unlock()
+		holdSay(r.sock(), "stop")
+		return err
+	}
+
+	args := append([]string{"hold", "-socket", r.sock(), "-dir", r.dir, "-log", m.log,
 		"-cols", fmt.Sprint(termCols), "-rows", fmt.Sprint(termRows), "--"}, argv...)
 	cmd := exec.Command(m.self, args...)
 	cmd.Env = env
 	cmd.Dir = r.dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return fail(err)
 	}
 	go cmd.Wait() // reap it if it ends while Superdeck is still here
 
@@ -559,12 +736,15 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 		}
 		if time.Now().After(deadline) {
 			cmd.Process.Kill()
-			return errors.New("the process could not be started")
+			return fail(errors.New("the process could not be started"))
 		}
 	}
-	m.runs[r.ID] = r
+	// A process Superdeck has no record of could never be found again after
+	// a restart, so one that cannot be recorded is not allowed to run.
 	if m.onStart != nil {
-		m.onStart(r)
+		if err := m.onStart(r); err != nil {
+			return fail(fmt.Errorf("could not record the new process: %w", err))
+		}
 	}
 	go r.watch()
 	return nil
@@ -582,26 +762,28 @@ func (m *Manager) Adopt(r *Run, onExit func(*Run)) {
 }
 
 // StopAll stops every process. Superdeck does not call this when it exits:
-// leaving processes running is the point. Tests do.
+// leaving processes running is the point. Tests do. It keeps going until
+// nothing is left, because a restart that was already under way can add a run
+// after the first pass.
 func (m *Manager) StopAll() {
-	m.mu.Lock()
-	rs := make([]*Run, 0, len(m.runs))
-	for _, r := range m.runs {
-		rs = append(rs, r)
-	}
-	m.mu.Unlock()
-	for _, r := range rs {
-		r.Stop()
-	}
-	deadline := time.Now().Add(7 * time.Second)
-	for time.Now().Before(deadline) {
-		busy := false
-		for _, r := range rs {
-			busy = busy || r.alive()
+	asked := map[string]bool{}
+	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		m.mu.Lock()
+		var live []*Run
+		for _, r := range m.runs {
+			if r.alive() {
+				live = append(live, r)
+			}
 		}
-		if !busy {
+		m.mu.Unlock()
+		if len(live) == 0 {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		for _, r := range live {
+			if !asked[r.ID] {
+				asked[r.ID] = true
+				r.Stop()
+			}
+		}
 	}
 }

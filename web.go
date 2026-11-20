@@ -696,8 +696,6 @@ func (a *App) doMove(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "/instances/"+old.ID+"/move", err)
 		return
 	}
-	a.remember(wanted{Account: old.Account, Project: old.Project}, false)
-	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	to(w, r, "/instances/"+run.ID)
 }
 

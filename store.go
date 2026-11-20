@@ -74,12 +74,16 @@ func migrate(db *sql.DB, path string, existed bool) error {
 	}
 	// Keep a copy of the data as it was before changing its shape.
 	if existed && current > 0 {
-		backup := fmt.Sprintf("%s.before-schema-%d", path, latest)
-		os.Remove(backup)
-		if _, err := db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
-			return fmt.Errorf("could not back up the data before upgrading it: %w", err)
+		// Named for the schema it holds. An existing one is left alone: if
+		// an upgrade failed half way, the copy from before it is the one
+		// worth keeping.
+		backup := fmt.Sprintf("%s.schema-%d.bak", path, current)
+		if _, err := os.Stat(backup); err != nil {
+			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
+				return fmt.Errorf("could not back up the data before upgrading it: %w", err)
+			}
+			log.Printf("backed up data to %s before upgrading", backup)
 		}
-		log.Printf("backed up data to %s before upgrading", backup)
 	}
 	results, err := p.Up(ctx)
 	if err != nil {

@@ -204,29 +204,37 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	return run, nil
 }
 
-// serverExited restarts an instance that died on its own, for example after
-// Claude gives up on a long network outage. It leaves alone anything a person
-// stopped, anything that failed at startup, and anything waiting on a sign-in
-// or trust decision, since restarting those would only loop.
+// serverExited decides what happens when an instance exits: restart it, or
+// leave it stopped.
+//
+// It is restarted, with a growing delay, when it died on its own after
+// running a while, and also when a restart attempt itself fails quickly:
+// after a long network outage the first attempts are expected to fail, and
+// giving up at the first one would end supervision for good.
+//
+// It is left stopped when a person stopped it, when it never got going in the
+// first place, and when it is waiting on something only a person can fix (a
+// sign-in, a trust decision). Those are forgotten, so that restarting
+// Superdeck does not keep bringing them back.
 func (a *App) serverExited(r *Run) {
 	if a.closing.Load() || r.wasStopped() {
 		return
 	}
-	hint := r.View().Hint
+	v := r.View()
 	// Right after the Mac starts, the Keychain may not be readable yet and
 	// Claude reports the account as signed out. Try again a few times before
 	// believing it.
-	if hint == "needs-login" && time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
-		n := r.Restarts + 1
-		log.Printf("%s reported signed out soon after startup; retrying in 30s (attempt %d)", r.Name, n)
-		time.AfterFunc(bootRetry, func() { a.restart(r, n) })
+	if v.Hint == "needs-login" && time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
+		log.Printf("%s reported signed out soon after startup; retrying in %s (attempt %d)", r.Name, bootRetry, r.Restarts+1)
+		a.scheduleRestart(r, r.Restarts+1, bootRetry)
 		return
 	}
-	if hint != "" {
-		return
+	if v.Hint == "needs-login" {
+		go a.refreshStatus(r.Account) // the account screen should say so too
 	}
 	life := time.Since(r.Started)
-	if life < minLife {
+	if v.Hint != "" || (life < minLife && r.Restarts == 0) {
+		a.remember(wanted{Account: r.Account, Project: r.Project}, false)
 		return
 	}
 	n := r.Restarts + 1
@@ -235,6 +243,7 @@ func (a *App) serverExited(r *Run) {
 	}
 	if n > maxRestarts {
 		log.Printf("%s: giving up after %d restarts in a row", r.Name, maxRestarts)
+		a.remember(wanted{Account: r.Account, Project: r.Project}, false)
 		return
 	}
 	delay := restartBase << (n - 1)
@@ -242,36 +251,120 @@ func (a *App) serverExited(r *Run) {
 		delay = 5 * time.Minute
 	}
 	log.Printf("%s exited on its own after %s; restarting in %s (attempt %d)", r.Name, life.Round(time.Second), delay, n)
+	a.scheduleRestart(r, n, delay)
+}
+
+func (a *App) scheduleRestart(r *Run, n int, delay time.Duration) {
+	r.setRestart(time.Now().Add(delay))
 	time.AfterFunc(delay, func() { a.restart(r, n) })
 }
 
+// restart is a scheduled restart coming due. Things may have changed while
+// it waited: the instance may have been stopped, moved or relaunched by a
+// person, in which case it must not come back.
 func (a *App) restart(r *Run, n int) {
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("%s: restart panicked: %v", r.Name, p)
 		}
 	}()
-	if a.closing.Load() {
+	if a.closing.Load() || r.wasStopped() || !a.isWanted(r.Account, r.Project) || a.running(r.Account, r.Project) {
+		r.setRestart(time.Time{})
 		return
 	}
-	if _, err := a.startServer(r.Account, r.Project, r.spawn, r.capacity, n); err != nil {
-		log.Printf("%s: restart failed: %v", r.Name, err)
+	next, err := a.startServer(r.Account, r.Project, r.spawn, r.capacity, n)
+	if err != nil {
+		// Could not even start it (the limit was reached, a disk is not
+		// mounted). Keep trying, more slowly, rather than dropping it.
+		if n >= maxRestarts {
+			log.Printf("%s: restart failed and no attempts are left: %v", r.Name, err)
+			r.setRestart(time.Time{})
+			a.remember(wanted{Account: r.Account, Project: r.Project}, false)
+			return
+		}
+		delay := restartBase << n
+		if delay > 5*time.Minute {
+			delay = 5 * time.Minute
+		}
+		log.Printf("%s: restart failed (%v); trying again in %s", r.Name, err, delay)
+		a.scheduleRestart(r, n+1, delay)
+		return
 	}
+	r.setNext(next.ID)
+}
+
+// isWanted reports whether a person launched this instance and has not
+// stopped it since.
+func (a *App) isWanted(accountID, folder string) bool {
+	for _, w := range a.loadWanted() {
+		if w.Account == accountID && w.Project == folder {
+			return true
+		}
+	}
+	return false
+}
+
+// canStart checks, without changing anything, that an instance for this
+// account and folder could be launched now.
+func (a *App) canStart(accountID, folder string, replacing *Run) error {
+	if _, err := a.accountDir(accountID); err != nil {
+		return err
+	}
+	if in, _ := a.accountStatus(accountID)["loggedIn"].(bool); !in {
+		return fmt.Errorf("sign in to %s first", a.accountName(accountID))
+	}
+	dir, err := resolveProject(a.roots, folder)
+	if err != nil {
+		return err
+	}
+	servers := 0
+	for _, v := range a.mgr.List() {
+		if v.Kind != "server" || v.Done || (replacing != nil && v.ID == replacing.ID) {
+			continue
+		}
+		servers++
+		if v.Account == accountID && v.Run.dir == dir {
+			return fmt.Errorf("%s is already running this folder", a.accountName(accountID))
+		}
+	}
+	if servers >= maxRunning {
+		return errors.New("too many instances are running; stop one first")
+	}
+	return nil
+}
+
+// stopAndWait stops a run and waits for it to be gone.
+func stopAndWait(r *Run) error {
+	r.Stop()
+	for deadline := time.Now().Add(8 * time.Second); r.alive(); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			return errors.New("the instance did not stop in time; try again")
+		}
+	}
+	return nil
 }
 
 // relaunch stops an instance and starts it again with the same account and
-// folder, which is how it picks up a newer Claude Code.
+// folder, which is how it picks up a newer Claude Code. It also brings back
+// one that has stopped.
 func (a *App) relaunch(old *Run) (*Run, error) {
 	if old.Kind != "server" {
 		return nil, errors.New("only instances can be relaunched")
 	}
-	old.Stop()
-	for deadline := time.Now().Add(8 * time.Second); old.alive(); time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			return nil, errors.New("the instance did not stop in time; try again")
-		}
+	// Check it can come back before taking it down.
+	if err := a.canStart(old.Account, old.Project, old); err != nil {
+		return nil, err
 	}
-	return a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
+	if err := stopAndWait(old); err != nil {
+		return nil, err
+	}
+	run, err := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
+	if err != nil {
+		return nil, err
+	}
+	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	old.setNext(run.ID)
+	return run, nil
 }
 
 // move stops an instance and launches the same folder under another account,
@@ -284,19 +377,28 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 	if to == old.Account {
 		return nil, errors.New("it is already running under that account")
 	}
-	if _, err := a.accountDir(to); err != nil {
+	// Everything that could stop the new one from starting is checked first,
+	// so a failed move leaves the old one running.
+	if err := a.canStart(to, old.Project, old); err != nil {
 		return nil, err
 	}
-	if in, _ := a.accountStatus(to)["loggedIn"].(bool); !in {
-		return nil, fmt.Errorf("%s is signed out; sign it in first", a.accountName(to))
+	if err := stopAndWait(old); err != nil {
+		return nil, err
 	}
-	old.Stop()
-	for deadline := time.Now().Add(8 * time.Second); old.alive(); time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			return nil, errors.New("the instance did not stop in time; try again")
+	a.remember(wanted{Account: old.Account, Project: old.Project}, false)
+	run, err := a.startServer(to, old.Project, old.spawn, old.capacity, 0)
+	if err != nil {
+		// It checked out a moment ago and still failed. Put the old one back
+		// rather than leave nothing running.
+		if back, berr := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0); berr == nil {
+			a.remember(wanted{back.Account, back.Project, back.spawn, back.capacity}, true)
+			old.setNext(back.ID)
 		}
+		return nil, fmt.Errorf("could not start it under %s, so it was put back under %s: %w", a.accountName(to), a.accountName(old.Account), err)
 	}
-	return a.startServer(to, old.Project, old.spawn, old.capacity, 0)
+	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	old.setNext(run.ID)
+	return run, nil
 }
 
 // startLogin runs Anthropic's own `claude auth login` for one account. The
@@ -400,23 +502,42 @@ func (a *App) expire(run *Run) {
 
 // adopt picks up the processes that were running when Superdeck last exited.
 // The ones still being held carry on untouched; the ones that are gone are
-// recorded as ended.
-func (a *App) adopt() {
+// recorded as ended. It reports whether it could read the record at all:
+// without it, nothing may be launched, or every held instance would get a
+// duplicate.
+func (a *App) adopt() bool {
 	runs, err := a.data().LiveRuns()
 	if err != nil {
 		log.Printf("reading running processes: %v", err)
-		return
+		return false
 	}
+	known := map[string]bool{}
 	for _, r := range runs {
-		if !a.mgr.Holding(r) {
-			a.data().EndRun(r.ID, -1)
+		known[r.ID] = true
+		switch state, code := a.mgr.Probe(r); state {
+		case "held":
+			a.mgr.Adopt(r, a.exitHook(r))
+			if r.Kind == "login" {
+				a.expire(r)
+			}
+			log.Printf("still running: %s", r.Name)
+		default: // it ended, or vanished, while Superdeck was away
+			a.data().EndRun(r.ID, code)
+			a.mgr.Forget(r.ID)
+		}
+	}
+	// A holder with no record cannot be supervised or shown. Stop it rather
+	// than let it run unseen beside whatever gets launched in its place.
+	for _, id := range a.mgr.Sockets() {
+		if known[id] {
 			continue
 		}
-		a.mgr.Adopt(r, a.exitHook(r))
-		if r.Kind == "login" {
-			a.expire(r)
+		if err := holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop"); err == nil {
+			log.Printf("stopped a process Superdeck had no record of (%s)", id)
+		} else {
+			a.mgr.Forget(id)
 		}
-		log.Printf("still running: %s", r.Name)
 	}
 	a.data().Prune()
+	return true
 }

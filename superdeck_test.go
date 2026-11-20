@@ -1,12 +1,15 @@
 package main
 
 import (
+	"fmt"
+	"net"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -126,7 +129,7 @@ case "$1 $2" in
   "auth status")
     if [ -f "$C/in" ]; then echo '{"loggedIn":true,"email":"t@example.com"}'; else echo '{"loggedIn":false}'; exit 1; fi ;;
   "auth login")
-    echo "If the browser didn't open, visit: https://claude.example/oauth?state=abc"
+    echo "If the browser didn't open, visit: https://claude.ai/oauth/authorize?state=abc"
     printf "Paste code here if prompted > "; read code
     if [ "$code" = "good-code" ]; then touch "$C/in"; echo "Login successful."; else echo "Login failed: invalid code"; exit 1; fi ;;
   "remote-control "*)
@@ -171,7 +174,7 @@ func testApp(t *testing.T) *App {
 }
 
 func init() {
-	pollEvery, answerWait = 25*time.Millisecond, 150*time.Millisecond
+	pollEvery, answerWait, startGrace = 25*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond
 }
 
 // The test binary doubles as the holder: Superdeck starts holders by
@@ -276,6 +279,7 @@ func TestScreenEscapesProcessOutput(t *testing.T) {
 func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -326,6 +330,7 @@ func TestRestartGivesUpEventually(t *testing.T) {
 	a.claude = "/usr/bin/true" // every launch exits at once
 	a.ver = "1"
 	a.verAt = time.Now()
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +421,7 @@ func TestSignInWithCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return run.View().URL != "" })
-	if u := run.View().URL; u != "https://claude.example/oauth?state=abc" {
+	if u := run.View().URL; u != "https://claude.ai/oauth/authorize?state=abc" {
 		t.Errorf("sign-in URL %q", u)
 	}
 	if _, err := a.startLogin("idle"); err == nil {
@@ -681,6 +686,7 @@ func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
 	// unlocked, and becomes readable a moment later.
 	marker := filepath.Join(a.state, "accounts", "work", "in")
 	os.Remove(marker)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +724,7 @@ func TestSignInScreens(t *testing.T) {
 	run := a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
 	waitFor(t, func() bool { return run.View().URL != "" })
 	page := do(a, "GET", loc, nil, "").Body.String()
-	for _, want := range []string{"Sign in to idle", `href="https://claude.example/oauth?state=abc"`, `name="code"`, "Cancel"} {
+	for _, want := range []string{"Sign in to idle", `href="https://claude.ai/oauth/authorize?state=abc"`, `name="code"`, "Cancel"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("sign-in screen is missing %q", want)
 		}
@@ -919,6 +925,7 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 func TestInstanceIsRelaunchedIfItsHolderDies(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -959,11 +966,217 @@ func TestLongOutputIsFollowedAndReplayedAfterRestart(t *testing.T) {
 	again := &Run{ID: r.ID, Kind: "server", Started: r.Started}
 	m2 := NewManager(m.self, "")
 	m2.dir = m.dir
-	if !m2.Holding(again) {
+	if state, _ := m2.Probe(again); state != "held" {
 		t.Fatal("holder not reachable from a second manager")
 	}
 	again.read()
 	if !strings.Contains(again.Tail(), "END-MARK") || again.Pid() != r.Pid() {
 		t.Errorf("replayed screen is missing the end: %q", lastLines(again.Tail(), 3))
+	}
+}
+
+// ---- the failure cases found in review ----
+
+func TestSlowHolderIsNotMistakenForDead(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/bin/sh", "-c", "echo up; sleep 60"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(r.Tail(), "up") && r.View().Run.hpid > 0 })
+	hpid, pid := r.View().Run.hpid, r.Pid()
+	// Freeze the holder for longer than a poll is willing to wait.
+	syscall.Kill(hpid, syscall.SIGSTOP)
+	time.Sleep(6500 * time.Millisecond)
+	alive := r.alive()
+	syscall.Kill(hpid, syscall.SIGCONT)
+	if !alive || !processAlive(pid) {
+		t.Fatal("a frozen holder cost a healthy process its life")
+	}
+	if _, err := os.Stat(r.sock()); err != nil {
+		t.Error("the live holder's socket was removed")
+	}
+	waitFor(t, func() bool { return r.read() })
+}
+
+func TestStalledViewerCannotFreezeAHolder(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	// Plenty of output up front, then a steady trickle.
+	if err := m.Start(r, []string{"/bin/sh", "-c", "head -c 400000 /dev/zero | tr '\\0' x; while :; do echo tick; sleep 0.05; done"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(r.Tail(), "tick") })
+	// A viewer attaches and never reads a byte.
+	c, err := net.Dial("unix", r.sock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintln(c, "attach")
+	// The holder must go on answering promptly regardless.
+	for i := 0; i < 20; i++ {
+		start := time.Now()
+		if _, _, err := holdSnap(r.sock(), 0); err != nil {
+			t.Fatalf("holder stopped answering with a stalled viewer attached: %v", err)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("holder took %s to answer with a stalled viewer attached", d)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !r.alive() {
+		t.Error("the process died")
+	}
+}
+
+func TestHolderNoticesExitEvenIfSomethingKeepsItsTerminalOpen(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	// The main process exits at once but leaves a child holding the terminal.
+	if err := m.Start(r, []string{"/bin/sh", "-c", "(trap '' HUP; sleep 20) & echo bye; exit 7"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return r.View().Done })
+	if r.View().ExitCode != 7 || !strings.Contains(r.Tail(), "bye") {
+		t.Errorf("exit %d output %q", r.View().ExitCode, r.Tail())
+	}
+}
+
+func TestConcurrentReadsDoNotDuplicateOutput(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/bin/sh", "-c", "i=0; while [ $i -lt 40 ]; do echo row-$i; i=$((i+1)); done; sleep 30"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 30; j++ {
+				r.read()
+			}
+		}()
+	}
+	wg.Wait()
+	waitFor(t, func() bool { return strings.Contains(r.Tail(), "row-39") })
+	if n := strings.Count(r.Tail(), "row-39"); n != 1 {
+		t.Errorf("row-39 appears %d times on the screen", n)
+	}
+}
+
+func TestQueuedRestartDoesNotFireAfterAMove(t *testing.T) {
+	minLife, restartBase = 0, 300*time.Millisecond
+	a := testApp(t)
+	os.MkdirAll(filepath.Join(a.state, "accounts", "spare"), 0o700)
+	os.WriteFile(filepath.Join(a.state, "accounts", "spare", "in"), nil, 0o600)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(first.Tail(), "serving") })
+	syscall.Kill(-first.Pid(), syscall.SIGKILL)
+	waitFor(t, func() bool { return !first.View().RestartAt.IsZero() }) // a restart is queued
+	if _, err := a.move(first, "spare"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(700 * time.Millisecond) // the queued restart comes due
+	live := 0
+	for _, v := range servers(a) {
+		if !v.Done {
+			live++
+			if v.Account != "spare" {
+				t.Errorf("it came back under %s after being moved away", v.Account)
+			}
+		}
+	}
+	if live != 1 {
+		t.Errorf("%d instances running after the move, want 1", live)
+	}
+}
+
+func TestFailedMoveLeavesTheOldInstanceRunning(t *testing.T) {
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
+	if _, err := a.move(run, "idle"); err == nil { // idle is signed out
+		t.Fatal("moved to a signed-out account")
+	}
+	if !run.alive() || run.wasStopped() || !a.isWanted("work", in(a, "app")) {
+		t.Error("a move that could not happen still stopped the instance")
+	}
+}
+
+func TestInstanceThatNeedsAPersonIsNotBroughtBackOnRestart(t *testing.T) {
+	a := testApp(t)
+	a.remember(wanted{"idle", in(a, "app"), "worktree", 4}, true)
+	a.started = time.Now().Add(-time.Hour) // not "soon after startup"
+	r, err := a.startServer("idle", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return !r.alive() })
+	waitFor(t, func() bool { return !a.isWanted("idle", in(a, "app")) })
+}
+
+func TestSecondSuperdeckOnTheSameDataIsHeldOff(t *testing.T) {
+	// The lock itself is taken in main; this checks the primitive behaves.
+	path := filepath.Join(t.TempDir(), "lock")
+	one, _ := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	two, _ := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	defer one.Close()
+	defer two.Close()
+	if err := syscall.Flock(int(one.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(two.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		t.Error("two holders of one lock")
+	}
+}
+
+func TestLeftoverFilesAreSweptAndUnknownHoldersStopped(t *testing.T) {
+	a := testApp(t)
+	// A holder Superdeck has no record of, as after a crash between starting
+	// a process and writing it down.
+	stray := &Run{Kind: "server", Account: "x", dir: t.TempDir()}
+	saved := a.mgr.onStart
+	a.mgr.onStart = nil
+	if err := a.mgr.Start(stray, []string{"/bin/sh", "-c", "sleep 60"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	a.mgr.onStart = saved
+	waitFor(t, func() bool { return stray.Pid() > 0 })
+	os.WriteFile(filepath.Join(a.mgr.dir, "deadbeef0000.exit"), []byte(`{"code":3}`), 0o600)
+	os.WriteFile(filepath.Join(a.mgr.dir, "deadbeef0000.sock"), nil, 0o600)
+
+	next := newApp(a.roots, a.state, a.claude)
+	if !next.adopt() {
+		t.Fatal("adopt failed")
+	}
+	waitFor(t, func() bool { return !processAlive(stray.Pid()) })
+	if _, err := os.Stat(filepath.Join(a.mgr.dir, "deadbeef0000.exit")); err == nil {
+		t.Error("leftover exit record was not swept")
+	}
+}
+
+func TestSignInButtonOnlyEverPointsAtAnthropic(t *testing.T) {
+	for text, want := range map[string]string{
+		"visit: https://claude.ai/oauth/authorize?x=1":                 "https://claude.ai/oauth/authorize?x=1",
+		"visit: https://platform.claude.com/oauth?x=1 then come back":  "https://platform.claude.com/oauth?x=1",
+		"docs at https://evil.example/claude.ai/login":                 "",
+		"https://claude.ai.evil.example/login":                         "",
+		"https://claude.ai/login and later https://evil.example/phish": "https://claude.ai/login",
+		"http://claude.ai/insecure":                                    "",
+		"nothing here":                                                 "",
+	} {
+		if got := signInURL(text); got != want {
+			t.Errorf("signInURL(%q) = %q, want %q", text, got, want)
+		}
 	}
 }

@@ -55,11 +55,7 @@ func newApp(roots []string, state, claude string) *App {
 	}
 	a.mgr = NewManager(self, state)
 	// Every process is recorded, so a restarted Superdeck knows what is being held.
-	a.mgr.onStart = func(r *Run) {
-		if err := a.data().SaveRun(r); err != nil {
-			log.Printf("recording %s: %v", r.Name, err)
-		}
-	}
+	a.mgr.onStart = func(r *Run) error { return a.data().SaveRun(r) }
 	a.mgr.onStop = func(r *Run) { a.data().MarkStopped(r.ID) }
 	a.mgr.onEnd = func(r *Run) { a.data().EndRun(r.ID, r.View().ExitCode) }
 	return a
@@ -122,9 +118,22 @@ func main() {
 		fmt.Print(launchAgent(self, args, filepath.Join(a.state, "superdeck.log"), path))
 		return
 	}
+	// Everything Superdeck writes is for this user only.
+	syscall.Umask(0o077)
 	if err := os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700); err != nil {
 		log.Fatal(err)
 	}
+	os.Chmod(a.state, 0o700)
+	// Two Superdecks sharing one state directory would each restart and
+	// duplicate the other's instances. Only one may run.
+	lock, err := os.OpenFile(filepath.Join(a.state, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		log.Fatalf("another Superdeck is already running with %s", a.state)
+	}
+	defer lock.Close()
 	// Open the data, upgrading its schema if this is a newer Superdeck.
 	// Nothing is launched and nothing listens until that has succeeded.
 	if err := a.openData(); err != nil {
@@ -155,9 +164,18 @@ func main() {
 		log.Printf("allowed folder: %s", root)
 	}
 	log.Print("no sign-in yet: anyone who can reach this address can use it")
-	a.adopt()
-	go a.restore()
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	// Claim the address before touching any process: if it is taken, this
+	// Superdeck must leave without having launched anything.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if a.adopt() {
+		go a.restore()
+	} else {
+		log.Print("not launching saved instances: could not tell what is already running")
+	}
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
