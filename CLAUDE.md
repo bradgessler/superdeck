@@ -50,7 +50,7 @@ go build -o superdeck . && ./superdeck ~/Projects
 
 - Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
-- Look at a changed screen in a browser at phone width and desktop width before calling it done.
+- Look at a changed screen in a browser at phone width and desktop width before calling it done. Anything you tap gets tried in iOS Safari (the simulator will do): touch behaves differently from a narrow desktop window.
 - Restarting Superdeck does not touch instances: their holders keep them alive. Killing a holder (`superdeck hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.
 - **Never run crash tests against someone's real instances.** Build a separate copy with its own `-state`, port and the stand-in CLI. A real session was lost this way once.
 - Never trust a folder or accept a consent prompt on the owner's behalf while testing against real Claude. Stop at the prompt.
