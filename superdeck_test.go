@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -70,9 +69,6 @@ func testApp(t *testing.T) *App {
 	a := &App{root: t.TempDir(), state: t.TempDir(), mgr: NewManager(),
 		status: map[string]map[string]any{}, hosts: map[string]bool{}}
 	os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700)
-	if err := a.loadToken(); err != nil {
-		t.Fatal(err)
-	}
 	if err := a.allowHosts("127.0.0.1:7433", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -80,9 +76,8 @@ func testApp(t *testing.T) *App {
 }
 
 func TestGuard(t *testing.T) {
-	a := testApp(t)
-	h := a.routes()
-	do := func(method, host, origin, cookie string) int {
+	h := testApp(t).routes()
+	do := func(method, host, origin string) int {
 		r := httptest.NewRequest(method, "/api/state", nil)
 		if method == "POST" {
 			r = httptest.NewRequest(method, "/api/accounts", strings.NewReader(`{"name":"x"}`))
@@ -92,27 +87,22 @@ func TestGuard(t *testing.T) {
 		if origin != "" {
 			r.Header.Set("Origin", origin)
 		}
-		if cookie != "" {
-			r.AddCookie(&http.Cookie{Name: "superdeck", Value: cookie})
-		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		return w.Code
 	}
 	cases := []struct {
-		name                         string
-		method, host, origin, cookie string
-		want                         int
+		name, method, host, origin string
+		want                       int
 	}{
-		{"no cookie", "GET", "127.0.0.1:7433", "", "", 401},
-		{"wrong cookie", "GET", "127.0.0.1:7433", "", "nope", 401},
-		{"signed in", "GET", "127.0.0.1:7433", "", a.session, 200},
-		{"rebinding host", "GET", "evil.example:7433", "", a.session, 403},
-		{"cross-origin post", "POST", "127.0.0.1:7433", "http://evil.example", a.session, 403},
-		{"post without origin", "POST", "127.0.0.1:7433", "", a.session, 403},
+		{"read", "GET", "127.0.0.1:7433", "", 200},
+		{"same-origin post", "POST", "127.0.0.1:7433", "http://127.0.0.1:7433", 200},
+		{"rebinding host", "GET", "evil.example:7433", "", 403},
+		{"cross-origin post", "POST", "127.0.0.1:7433", "http://evil.example", 403},
+		{"post without origin", "POST", "127.0.0.1:7433", "", 403},
 	}
 	for _, c := range cases {
-		if got := do(c.method, c.host, c.origin, c.cookie); got != c.want {
+		if got := do(c.method, c.host, c.origin); got != c.want {
 			t.Errorf("%s: status %d, want %d", c.name, got, c.want)
 		}
 	}

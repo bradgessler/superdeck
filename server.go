@@ -2,12 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,9 +31,6 @@ var uiFS embed.FS
 type App struct {
 	root, state, claude string
 	hosts               map[string]bool
-	session             string // cookie value derived from the token
-	token               string
-	loginMu             sync.Mutex
 	mgr                 *Manager
 
 	statusMu sync.Mutex
@@ -48,7 +41,7 @@ func main() {
 	home, _ := os.UserHomeDir()
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
 	root := flag.String("root", filepath.Join(home, "Projects"), "directory that holds your projects")
-	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for the access token and per-account Claude config")
+	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for per-account Claude config")
 	claude := flag.String("claude", "", "path to the claude binary (default: found on PATH)")
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
 	flag.Parse()
@@ -68,9 +61,6 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700); err != nil {
 		log.Fatal(err)
 	}
-	if err := a.loadToken(); err != nil {
-		log.Fatal(err)
-	}
 	if err := a.allowHosts(*addr, *extra); err != nil {
 		log.Fatal(err)
 	}
@@ -87,34 +77,10 @@ func main() {
 		srv.Shutdown(ctx)
 	}()
 	log.Printf("superdeck on http://%s  projects=%s  claude=%s", *addr, a.root, a.claude)
-	log.Printf("sign in with the token stored in %s", filepath.Join(a.state, "token"))
+	log.Print("no sign-in yet: anyone who can reach this address can use it")
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
-}
-
-func (a *App) loadToken() error {
-	path := filepath.Join(a.state, "token")
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err != nil {
-			return err
-		}
-		b = []byte(hex.EncodeToString(raw))
-		if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	a.token = strings.TrimSpace(string(b))
-	if len(a.token) < 32 {
-		return errors.New("token file is too short; delete it to generate a new one")
-	}
-	sum := sha256.Sum256([]byte("superdeck-session:" + a.token))
-	a.session = hex.EncodeToString(sum[:])
-	return nil
 }
 
 // allowHosts fixes the set of Host header values the server answers to, which
@@ -149,7 +115,6 @@ func (a *App) routes() http.Handler {
 	sub, _ := fs.Sub(uiFS, "ui")
 	static := http.FileServer(http.FS(sub))
 	mux.Handle("GET /", static)
-	mux.HandleFunc("POST /login", a.handleLogin)
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("POST /api/accounts", a.handleAddAccount)
 	mux.HandleFunc("POST /api/accounts/{name}/login", a.handleAccountLogin)
@@ -163,8 +128,9 @@ func (a *App) routes() http.Handler {
 	return a.guard(mux)
 }
 
-// guard applies, in order: Host allow-list, same-origin check on every
-// state-changing request, and the session cookie.
+// guard applies a Host allow-list and a same-origin check on every
+// state-changing request, so a web page elsewhere cannot drive this server
+// through your browser. There is no sign-in yet.
 func (a *App) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.hosts[r.Host] {
@@ -180,45 +146,11 @@ func (a *App) guard(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		// Not "no-referrer": that makes browsers send "Origin: null" on form
-		// posts, which the same-origin check above would refuse.
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
 		w.Header().Set("Cache-Control", "no-store")
-		open := r.URL.Path == "/login" || r.URL.Path == "/login.html"
-		if !open && !a.authed(r) {
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				http.Error(w, "sign in first", http.StatusUnauthorized)
-			} else {
-				http.Redirect(w, r, "/login.html", http.StatusSeeOther)
-			}
-			return
-		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (a *App) authed(r *http.Request) bool {
-	c, err := r.Cookie("superdeck")
-	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(a.session)) == 1
-}
-
-func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	got := strings.TrimSpace(r.FormValue("token"))
-	if subtle.ConstantTimeCompare([]byte(got), []byte(a.token)) != 1 {
-		// One guess per second across all clients.
-		a.loginMu.Lock()
-		time.Sleep(time.Second)
-		a.loginMu.Unlock()
-		http.Redirect(w, r, "/login.html?failed=1", http.StatusSeeOther)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: "superdeck", Value: a.session, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, MaxAge: 30 * 24 * 3600,
-	})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (a *App) accounts() []string {

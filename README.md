@@ -4,7 +4,7 @@ Start Claude Code Remote Control servers on a Mac from your phone, under more th
 
 Superdeck is a small web page served by one Go binary on your Mac. From it you pick a project and an account and press Start. The Mac runs Anthropic's own `claude remote-control` in that folder, and you carry on the conversation in the official Claude app. Superdeck is a launcher, not a chat client.
 
-**Status: proof of concept.** It exists to answer the open questions below. It does not restart crashed servers, has no launchd installer and serves plain HTTP. Do not rely on it yet.
+**Status: proof of concept.** It exists to answer the open questions below. It has no sign-in, does not restart crashed servers, has no launchd installer and serves plain HTTP. Do not rely on it yet.
 
 ## What it does today
 
@@ -23,9 +23,9 @@ go build -o superdeck .
 ./superdeck -root ~/Projects
 ```
 
-Open `http://127.0.0.1:7433` and sign in with the token in `~/.superdeck/token`.
+Open `http://127.0.0.1:7433`.
 
-To reach it from a phone on your LAN or home VPN, listen on the Mac's LAN address:
+To reach it from a phone on your LAN or home VPN, listen on the Mac's LAN address. There is no sign-in, so anything that can reach that address can use it; only do this on a network you trust.
 
 ```bash
 ./superdeck -addr 192.168.1.20:7433 -root ~/Projects
@@ -46,7 +46,7 @@ These are what the proof of concept is for. "Observed" means seen on macOS with 
 | 5 | Does each server show up in the Claude app under the right account, and only that account? | **Open.** |
 | 6 | Does it all still work when started by launchd at login, including Keychain access? | **Open.** Other projects report stale Keychain entries under launchd. |
 | 7 | What happens after a network outage longer than ten minutes, when the server exits by design? | **Open.** There is no automatic restart yet. |
-| 8 | Is plain HTTP acceptable on a home VPN? | **Open.** The session cookie is not marked Secure. TLS is not built. |
+| 8 | Is a trusted LAN plus VPN enough, with no sign-in and plain HTTP? | **Working assumption for now.** Revisit before running it anywhere less private. |
 | 9 | Can `--chrome` browser sessions run this way when the browser extension is signed in to a different account? | **Open.** |
 | 10 | Is passing a sign-in code through this console within Anthropic's terms for third-party tools? | **Open.** Superdeck never reads or stores credentials; the code goes straight to the official binary's terminal. Read the [terms](https://code.claude.com/docs/en/legal-and-compliance) before relying on it. |
 
@@ -57,16 +57,16 @@ Known limits that are not going away:
 
 ## Security model
 
-Superdeck can start processes on your Mac, so treat it as a remote control for the machine.
+Superdeck can start processes on your Mac, so treat it as a remote control for the machine. It has no sign-in. The model is: it can only do a short, fixed list of things, and you keep it reachable only from a private network.
 
 - It only starts two fixed commands, `claude auth login` and `claude remote-control`, with arguments it builds itself. There is no endpoint that takes a command.
 - Projects are confined to the `-root` folder after symlinks are resolved.
-- Every request must carry an allowed `Host` header; every state-changing request must be same-origin; everything except the sign-in page needs the session cookie.
+- Every request must carry an allowed `Host` header and every state-changing request must be same-origin, so a web page elsewhere cannot drive it through your browser.
 - Child processes get an explicit environment. The launcher's own `CLAUDE_*` and `ANTHROPIC_*` variables are not passed on.
 - It never passes `--dangerously-skip-permissions` or any permission-mode override, and never edits Claude's config to pre-trust a folder.
-- The console accepts keystrokes for the process it is showing. Anyone signed in to Superdeck can type into those Claude prompts.
+- The console accepts keystrokes for the process it is showing. Anyone who can reach Superdeck can type into those Claude prompts.
 
-Not yet built: TLS, sign-in rate limiting beyond one guess per second, log files and redaction, automatic restart, launchd install.
+Not yet built: sign-in, TLS, log files and redaction, automatic restart, launchd install.
 
 ## Development
 
