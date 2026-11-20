@@ -2,47 +2,47 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
 	"html/template"
-	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/creack/pty"
-	"github.com/hinshun/vt10x"
 )
 
 const (
-	maxTail    = 8 << 10
 	maxRunning = 16
-	termCols   = 200
-	termRows   = 50
+	termCols   = "200" // wide, so Claude never breaks a link or path across lines
+	termRows   = "50"
 )
 
+// pollEvery is how often a process's screen and state are read from tmux.
+var pollEvery = 400 * time.Millisecond
+
 var (
-	ansiRe    = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]`)
 	urlRe     = regexp.MustCompile(`https://[^\s"'<>]+`)
-	trustRe   = regexp.MustCompile(`(?im)workspace not trusted|do you trust|trust this folder|trust the files|one you trust|^trust .+\? \[y/n\]`)
 	linkRe    = regexp.MustCompile(`https://claude\.ai/code\?environment=[A-Za-z0-9_]+`)
-	askRe     = regexp.MustCompile(`(?i)(\[y/n\]|\(y/n\))\s*:?\s*$`)
+	trustRe   = regexp.MustCompile(`(?i)^\s*(do you )?trust .+\?`)
 	loginRe   = regexp.MustCompile(`(?i)must be logged in|claude auth login|please run /login`)
 	consentRe = regexp.MustCompile(`(?i)enable remote control\?`)
+	askRe     = regexp.MustCompile(`(?i)(\[y/n\]|\(y/n\))\s*:?\s*\S{0,3}\s*$`)
+	deadRe    = regexp.MustCompile(`(?m)^Pane is dead \(.*\)\s*$`)
 )
 
 // childEnv is the whole environment a claude process gets. Nothing is
 // inherited implicitly, so one account's variables (or the launcher's own
 // CLAUDE_* / ANTHROPIC_* variables) cannot leak into another account's process.
 func childEnv(configDir string) []string {
-	env := []string{"TERM=xterm-256color"}
+	env := []string{"TERM=screen-256color"}
 	if configDir != "" {
 		env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
 	}
@@ -58,9 +58,9 @@ func childEnv(configDir string) []string {
 	return append(env, "LANG="+lang)
 }
 
-// Run is one supervised claude process attached to a pseudo-terminal. Its
-// output feeds a terminal emulator held here on the server; pages show that
-// emulator's screen as plain HTML.
+// Run is one claude process. It lives in its own tmux session rather than as
+// a child of Superdeck, so it keeps running while Superdeck restarts. Superdeck
+// reads its screen from tmux and sends it keys through tmux.
 type Run struct {
 	ID      string
 	Kind    string // "server", "login" or "update"
@@ -75,21 +75,20 @@ type Run struct {
 
 	spawn    string
 	capacity int
-
-	dir    string
-	cmd    *exec.Cmd
-	tty    *os.File
-	vt     vt10x.Terminal
-	onExit func(*Run)
+	dir      string
+	mgr      *Manager
+	onExit   func(*Run)
 
 	mu       sync.Mutex
+	text     string // the screen and recent scrollback, as plain text
+	final    string // the screen as it was when the process exited, with colour codes
 	link     string // where Claude says this instance can be opened
-	vtBroken bool   // the emulator choked on this output; show plain text instead
-	tail     string // recent output as plain text
 	stopped  bool   // someone asked for this process to stop
 	done     bool
 	exitCode int
 }
+
+func (r *Run) session() string { return "sd-" + r.ID }
 
 // RunView is a snapshot of a Run's changing state.
 type RunView struct {
@@ -101,74 +100,6 @@ type RunView struct {
 	Question string // Claude's own words, for a yes/no question this program does not know
 	URL      string // sign-in page, for a login that is waiting
 	Link     string // claude.ai address of a connected instance
-}
-
-func (r *Run) View() RunView {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped}
-	if !r.done {
-		v.Link = r.link
-	}
-	recent := r.tail
-	if len(recent) > 2048 {
-		recent = recent[len(recent)-2048:]
-	}
-	switch {
-	case trustRe.MatchString(recent):
-		v.Hint = "needs-trust"
-	case consentRe.MatchString(recent):
-		v.Hint = "needs-consent"
-	case !r.done && askRe.MatchString(strings.TrimRight(recent, " \r\n")):
-		v.Hint, v.Question = "needs-answer", lastLines(recent, 10)
-	case r.Kind == "server" && loginRe.MatchString(recent):
-		v.Hint = "needs-login"
-	}
-	if r.Kind == "login" && !r.done {
-		if m := urlRe.FindAllString(r.tail, -1); len(m) > 0 {
-			v.URL = m[len(m)-1]
-		}
-	}
-	return v
-}
-
-// feed passes output to the terminal emulator. The emulator is third-party
-// code parsing whatever a process prints, so a panic in it must never take
-// Superdeck, and every instance with it, down.
-func (r *Run) feed(b []byte) {
-	defer func() {
-		if recover() != nil {
-			r.mu.Lock()
-			r.vtBroken = true
-			r.mu.Unlock()
-		}
-	}()
-	r.vt.Write(b)
-}
-
-func (r *Run) append(b []byte) {
-	r.mu.Lock()
-	broken := r.vtBroken
-	r.mu.Unlock()
-	if !broken {
-		r.feed(b)
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	// A cleared screen means whatever prompt was showing is gone.
-	text := string(b)
-	if i := strings.LastIndex(text, "\x1b[2J"); i >= 0 {
-		r.tail, text = "", text[i:]
-	}
-	r.tail += ansiRe.ReplaceAllString(text, "")
-	if len(r.tail) > maxTail {
-		r.tail = r.tail[len(r.tail)-maxTail:]
-	}
-	if r.Kind == "server" {
-		if m := linkRe.FindAllString(r.tail, -1); len(m) > 0 {
-			r.link = m[len(m)-1]
-		}
-	}
 }
 
 // lastLines returns up to n trailing non-empty lines of text.
@@ -185,107 +116,44 @@ func lastLines(text string, n int) string {
 	return strings.Join(keep, "\n")
 }
 
-// Tail is the recent output as plain text.
+func (r *Run) View() RunView {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v := RunView{Run: r, Done: r.done, ExitCode: r.exitCode, Stopped: r.stopped}
+	// What matters is what is on the screen now, at the bottom: a question is
+	// only a question while it is the last thing Claude printed.
+	// An earlier, answered question may still be visible above it, so the
+	// kind of question is read from that last line alone.
+	recent := lastLines(r.text, 12)
+	last := lastLines(r.text, 1)
+	switch {
+	case !r.done && askRe.MatchString(last) && trustRe.MatchString(last):
+		v.Hint = "needs-trust"
+	case !r.done && askRe.MatchString(last) && consentRe.MatchString(last):
+		v.Hint = "needs-consent"
+	case !r.done && askRe.MatchString(last):
+		v.Hint, v.Question = "needs-answer", lastLines(r.text, 10)
+	case r.done && strings.Contains(strings.ToLower(recent), "workspace not trusted"):
+		v.Hint = "needs-trust"
+	case r.Kind == "server" && loginRe.MatchString(recent):
+		v.Hint = "needs-login"
+	}
+	if r.Kind == "login" && !r.done {
+		if m := urlRe.FindAllString(r.text, -1); len(m) > 0 {
+			v.URL = m[len(m)-1]
+		}
+	}
+	if !r.done {
+		v.Link = r.link
+	}
+	return v
+}
+
+// Tail is the screen and recent scrollback as plain text.
 func (r *Run) Tail() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.tail
-}
-
-// palette is the 16 base terminal colours, tuned for the page's dark theme.
-var palette = [16]string{
-	"#3a312a", "#ff6b5e", "#6fdc8c", "#ffb224", "#7aa7ff", "#d58cff", "#5fd3d3", "#d9d0c5",
-	"#75695e", "#ff8a80", "#93e8a8", "#ffc85c", "#9dbdff", "#e2adff", "#8be3e3", "#ffffff",
-}
-
-func cssColor(c vt10x.Color) string {
-	switch {
-	case c < 16:
-		return palette[c]
-	case c < 232:
-		n := int(c) - 16
-		lv := func(v int) int {
-			if v == 0 {
-				return 0
-			}
-			return 55 + 40*v
-		}
-		return fmt.Sprintf("#%02x%02x%02x", lv(n/36), lv(n/6%6), lv(n%6))
-	case c < 256:
-		g := 8 + 10*(int(c)-232)
-		return fmt.Sprintf("#%02x%02x%02x", g, g, g)
-	case c < 1<<24:
-		return fmt.Sprintf("#%06x", uint32(c))
-	}
-	return ""
-}
-
-// Screen renders the terminal emulator's current screen as HTML. Every
-// character from the process is escaped; the only markup is colour spans whose
-// values are generated here.
-func (r *Run) Screen() (out template.HTML) {
-	plain := func() template.HTML { return template.HTML(html.EscapeString(lastLines(r.Tail(), 40))) }
-	r.mu.Lock()
-	broken := r.vtBroken
-	r.mu.Unlock()
-	if broken {
-		return plain()
-	}
-	defer func() {
-		if recover() != nil {
-			out = plain()
-		}
-	}()
-	r.vt.Lock()
-	defer r.vt.Unlock()
-	cols, rows := r.vt.Size()
-	lines := make([]string, 0, rows)
-	for y := 0; y < rows; y++ {
-		last := -1
-		for x := 0; x < cols; x++ {
-			g := r.vt.Cell(x, y)
-			if (g.Char != ' ' && g.Char != 0) || g.BG != vt10x.DefaultBG {
-				last = x
-			}
-		}
-		var b strings.Builder
-		cur := ""
-		for x := 0; x <= last; x++ {
-			g := r.vt.Cell(x, y)
-			st := ""
-			if c := cssColor(g.FG); c != "" {
-				st += "color:" + c + ";"
-			}
-			if c := cssColor(g.BG); c != "" {
-				st += "background:" + c + ";"
-			}
-			if g.Mode&4 != 0 { // bold
-				st += "font-weight:700;"
-			}
-			if st != cur {
-				if cur != "" {
-					b.WriteString("</span>")
-				}
-				if st != "" {
-					b.WriteString(`<span style="` + st + `">`)
-				}
-				cur = st
-			}
-			ch := g.Char
-			if ch == 0 {
-				ch = ' '
-			}
-			b.WriteString(html.EscapeString(string(ch)))
-		}
-		if cur != "" {
-			b.WriteString("</span>")
-		}
-		lines = append(lines, b.String())
-	}
-	for len(lines) > 1 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return template.HTML(strings.Join(lines, "\n"))
+	return r.text
 }
 
 func (r *Run) alive() bool {
@@ -300,29 +168,22 @@ func (r *Run) wasStopped() bool {
 	return r.stopped
 }
 
-func (r *Run) Input(data string) error {
+// Type sends literal text to the process, as if typed.
+func (r *Run) Type(text string) error {
 	if !r.alive() {
 		return errors.New("that process has already exited")
 	}
-	// Once a prompt has been answered it no longer describes the process.
-	r.mu.Lock()
-	r.tail = ""
-	r.mu.Unlock()
-	_, err := r.tty.WriteString(data)
+	_, err := r.mgr.tmux("send-keys", "-t", r.session(), "-l", "--", text)
 	return err
 }
 
-// Resize sets the terminal size, for a phone or a desktop viewer.
-func (r *Run) Resize(cols, rows int) {
+// Press sends one named key: Enter, Up, Down or Escape.
+func (r *Run) Press(key string) error {
 	if !r.alive() {
-		return
+		return errors.New("that process has already exited")
 	}
-	defer func() { recover() }()
-	if c, rw := r.vt.Size(); c == cols && rw == rows {
-		return
-	}
-	r.vt.Resize(cols, rows)
-	pty.Setsize(r.tty, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	_, err := r.mgr.tmux("send-keys", "-t", r.session(), key)
+	return err
 }
 
 // Stop asks the whole process group to exit, then kills it if it lingers.
@@ -330,10 +191,17 @@ func (r *Run) Stop() {
 	r.mu.Lock()
 	r.stopped = true
 	r.mu.Unlock()
+	if r.mgr.onStop != nil {
+		r.mgr.onStop(r)
+	}
 	if !r.alive() {
 		return
 	}
-	pid := r.cmd.Process.Pid
+	pid := r.pid()
+	if pid <= 1 {
+		r.mgr.tmux("kill-session", "-t", r.session())
+		return
+	}
 	syscall.Kill(-pid, syscall.SIGTERM)
 	go func() {
 		time.Sleep(5 * time.Second)
@@ -343,42 +211,232 @@ func (r *Run) Stop() {
 	}()
 }
 
-func (r *Run) pump() {
-	b := make([]byte, 8192)
-	for {
-		n, err := r.tty.Read(b)
-		if n > 0 {
-			r.append(b[:n])
-		}
-		if err != nil {
-			break
+func (r *Run) pid() int {
+	out, err := r.mgr.tmux("display-message", "-p", "-t", r.session(), "#{pane_pid}")
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(out))
+	return pid
+}
+
+// read refreshes this run's state from tmux. It returns false once the
+// process has exited.
+func (r *Run) read() bool {
+	state, err := r.mgr.tmux("display-message", "-p", "-t", r.session(), "#{pane_dead}|#{pane_dead_status}")
+	gone := err != nil // the session vanished, for example because tmux itself was killed
+	dead := gone || strings.HasPrefix(state, "1|")
+	var text string
+	if !gone {
+		text, _ = r.mgr.tmux("capture-pane", "-p", "-J", "-t", r.session(), "-S", "-300")
+		text = deadRe.ReplaceAllString(text, "")
+	}
+	var final string
+	code := -1
+	if dead && !gone {
+		// Include scrollback: when a pane dies tmux pushes its top line off
+		// the screen to make room for its own "Pane is dead" notice.
+		final, _ = r.mgr.tmux("capture-pane", "-p", "-e", "-J", "-t", r.session(), "-S", "-300")
+		final = deadRe.ReplaceAllString(final, "")
+		if f := strings.SplitN(strings.TrimSpace(state), "|", 2); len(f) == 2 {
+			if n, err := strconv.Atoi(f[1]); err == nil {
+				code = n
+			}
 		}
 	}
-	code := 0
-	if err := r.cmd.Wait(); err != nil {
-		code = -1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		}
-	}
-	r.tty.Close()
 	r.mu.Lock()
-	r.done, r.exitCode = true, code
+	if !gone {
+		r.text = text
+	}
+	if r.Kind == "server" {
+		if m := linkRe.FindAllString(r.text, -1); len(m) > 0 {
+			r.link = m[len(m)-1]
+		}
+	}
+	if dead {
+		r.done, r.exitCode, r.final = true, code, final
+	}
 	r.mu.Unlock()
+	return !dead
+}
+
+// watch follows a process until it exits.
+func (r *Run) watch() {
+	for r.read() {
+		time.Sleep(pollEvery)
+	}
+	r.mgr.tmux("kill-session", "-t", r.session())
+	if r.mgr.onEnd != nil {
+		r.mgr.onEnd(r)
+	}
 	if r.onExit != nil {
 		r.onExit(r)
 	}
 }
 
-// Manager owns every Run. It only ever starts the fixed command shapes built
-// in instances.go and web.go; no request can hand it a command.
+// Screen renders what the process is showing as HTML. Every character from the
+// process is escaped; the only markup is colour spans whose values are
+// generated here.
+func (r *Run) Screen() template.HTML {
+	r.mu.Lock()
+	done, raw := r.done, r.final
+	r.mu.Unlock()
+	if !done {
+		raw, _ = r.mgr.tmux("capture-pane", "-p", "-e", "-J", "-t", r.session())
+	}
+	return ansiToHTML(strings.TrimRight(raw, "\n "))
+}
+
+// palette is the 16 base terminal colours, tuned for the page's dark theme.
+var palette = [16]string{
+	"#3a312a", "#ff6b5e", "#6fdc8c", "#ffb224", "#7aa7ff", "#d58cff", "#5fd3d3", "#d9d0c5",
+	"#75695e", "#ff8a80", "#93e8a8", "#ffc85c", "#9dbdff", "#e2adff", "#8be3e3", "#ffffff",
+}
+
+func colour256(n int) string {
+	switch {
+	case n < 0 || n > 255:
+		return ""
+	case n < 16:
+		return palette[n]
+	case n < 232:
+		n -= 16
+		lv := func(v int) int {
+			if v == 0 {
+				return 0
+			}
+			return 55 + 40*v
+		}
+		return fmt.Sprintf("#%02x%02x%02x", lv(n/36), lv(n/6%6), lv(n%6))
+	}
+	g := 8 + 10*(n-232)
+	return fmt.Sprintf("#%02x%02x%02x", g, g, g)
+}
+
+var sgrRe = regexp.MustCompile(`\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]`)
+
+// ansiToHTML turns text with terminal colour codes into escaped HTML with
+// colour spans. Any other escape sequence is dropped.
+func ansiToHTML(s string) template.HTML {
+	var b strings.Builder
+	fg, bg, bold, open := "", "", false, false
+	emit := func() {
+		if open {
+			b.WriteString("</span>")
+			open = false
+		}
+		st := ""
+		if fg != "" {
+			st += "color:" + fg + ";"
+		}
+		if bg != "" {
+			st += "background:" + bg + ";"
+		}
+		if bold {
+			st += "font-weight:700;"
+		}
+		if st != "" {
+			b.WriteString(`<span style="` + st + `">`)
+			open = true
+		}
+	}
+	pos := 0
+	for _, m := range sgrRe.FindAllStringSubmatchIndex(s, -1) {
+		b.WriteString(html.EscapeString(s[pos:m[0]]))
+		pos = m[1]
+		if m[2] < 0 { // not a colour code
+			continue
+		}
+		var codes []int
+		for _, f := range strings.Split(s[m[2]:m[3]], ";") {
+			n, _ := strconv.Atoi(f)
+			codes = append(codes, n)
+		}
+		for i := 0; i < len(codes); i++ {
+			c := codes[i]
+			switch {
+			case c == 0:
+				fg, bg, bold = "", "", false
+			case c == 1:
+				bold = true
+			case c == 22:
+				bold = false
+			case c >= 30 && c <= 37:
+				fg = palette[c-30]
+			case c >= 90 && c <= 97:
+				fg = palette[c-90+8]
+			case c == 39:
+				fg = ""
+			case c >= 40 && c <= 47:
+				bg = palette[c-40]
+			case c >= 100 && c <= 107:
+				bg = palette[c-100+8]
+			case c == 49:
+				bg = ""
+			case (c == 38 || c == 48) && i+2 < len(codes) && codes[i+1] == 5:
+				if col := colour256(codes[i+2]); c == 38 {
+					fg = col
+				} else {
+					bg = col
+				}
+				i += 2
+			case (c == 38 || c == 48) && i+4 < len(codes) && codes[i+1] == 2:
+				col := fmt.Sprintf("#%02x%02x%02x", codes[i+2]&255, codes[i+3]&255, codes[i+4]&255)
+				if c == 38 {
+					fg = col
+				} else {
+					bg = col
+				}
+				i += 4
+			}
+		}
+		emit()
+	}
+	b.WriteString(html.EscapeString(s[pos:]))
+	if open {
+		b.WriteString("</span>")
+	}
+	return template.HTML(b.String())
+}
+
+// Manager owns every Run and the tmux server that holds their processes. It
+// only ever starts the fixed command shapes built in instances.go; no request
+// can hand it a command.
 type Manager struct {
+	bin, socket string
+	onStart     func(*Run) // record a new process
+	onStop      func(*Run) // record that a person stopped one
+	onEnd       func(*Run) // record that one exited
+
 	mu   sync.Mutex
 	runs map[string]*Run
 }
 
-func NewManager() *Manager { return &Manager{runs: map[string]*Run{}} }
+// NewManager uses the tmux binary at bin and a private tmux server reached
+// through socket, separate from any tmux the person uses themselves.
+func NewManager(bin, socket string) *Manager {
+	// A Unix socket path has a short length limit.
+	if len(socket) > 90 {
+		sum := sha256.Sum256([]byte(socket))
+		socket = "/tmp/superdeck-" + hex.EncodeToString(sum[:6]) + ".sock"
+	}
+	return &Manager{bin: bin, socket: socket, runs: map[string]*Run{}}
+}
+
+func (m *Manager) tmux(args ...string) (string, error) {
+	cmd := exec.Command(m.bin, append([]string{"-S", m.socket, "-f", "/dev/null"}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("tmux %s: %s", args[0], strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+// Holding reports whether tmux still has a session for this run.
+func (m *Manager) Holding(r *Run) bool {
+	_, err := m.tmux("has-session", "-t", r.session())
+	return err == nil
+}
 
 func (m *Manager) Get(id string) *Run {
 	m.mu.Lock()
@@ -402,12 +460,9 @@ func (m *Manager) List() []RunView {
 	return out
 }
 
-// Start launches argv under a pseudo-terminal. A second live run with the same
-// kind, account and directory is refused, so one account cannot run two
-// servers over the same working tree.
-func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// check refuses a second live run of the same kind for the same account and
+// directory, so one account cannot run two servers over one working tree.
+func (m *Manager) check(r *Run) error {
 	live := 0
 	for id, o := range m.runs {
 		if !o.alive() {
@@ -424,27 +479,57 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 	if live >= maxRunning {
 		return errors.New("too many things are running; stop one first")
 	}
+	return nil
+}
+
+// Start launches argv in a new tmux session. The arguments are passed to tmux
+// as separate arguments, which it executes directly: no shell is involved.
+// `env -i` gives the process exactly the environment in env and nothing else.
+func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(r); err != nil {
+		return err
+	}
 	idb := make([]byte, 6)
 	rand.Read(idb)
 	r.ID = hex.EncodeToString(idb)
 	r.Started = time.Now()
-	r.onExit = onExit
-	// Wide, so Claude never breaks a link or a path across lines. The page
-	// wraps the text to fit whatever screen it is shown on.
-	r.vt = vt10x.New(vt10x.WithSize(termCols, termRows), vt10x.WithWriter(io.Discard))
-	r.cmd = exec.Command(argv[0], argv[1:]...)
-	r.cmd.Dir = r.dir
-	r.cmd.Env = env
-	tty, err := pty.StartWithSize(r.cmd, &pty.Winsize{Cols: termCols, Rows: termRows})
-	if err != nil {
+	r.mgr, r.onExit = m, onExit
+	args := []string{
+		"start-server", ";",
+		"set", "-g", "remain-on-exit", "on", ";", // keep the screen and exit status of a finished process
+		"set", "-g", "status", "off", ";",
+		"set", "-g", "history-limit", "2000", ";",
+		"new-session", "-d", "-s", r.session(), "-x", termCols, "-y", termRows, "-c", r.dir, "--",
+		"/usr/bin/env", "-i",
+	}
+	args = append(args, env...)
+	args = append(args, argv...)
+	if _, err := m.tmux(args...); err != nil {
 		return err
 	}
-	r.tty = tty
 	m.runs[r.ID] = r
-	go r.pump()
+	if m.onStart != nil {
+		m.onStart(r)
+	}
+	go r.watch()
 	return nil
 }
 
+// Adopt takes over a run that was started before Superdeck restarted and is
+// still held by tmux.
+func (m *Manager) Adopt(r *Run, onExit func(*Run)) {
+	m.mu.Lock()
+	r.mgr, r.onExit = m, onExit
+	m.runs[r.ID] = r
+	m.mu.Unlock()
+	r.read()
+	go r.watch()
+}
+
+// StopAll stops every process and the tmux server. Superdeck does not call
+// this when it exits: leaving processes running is the point. Tests do.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
 	rs := make([]*Run, 0, len(m.runs))
@@ -462,8 +547,9 @@ func (m *Manager) StopAll() {
 			busy = busy || r.alive()
 		}
 		if !busy {
-			return
+			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
+	m.tmux("kill-server")
 }

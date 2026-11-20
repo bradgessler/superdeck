@@ -165,8 +165,28 @@ func testApp(t *testing.T) *App {
 	if err := a.allowHosts(host, ""); err != nil {
 		t.Fatal(err)
 	}
+	if a.mgr.bin == "" {
+		t.Skip("tmux is not installed")
+	}
 	t.Cleanup(func() { a.closing.Store(true); a.mgr.StopAll() })
 	return a
+}
+
+func init() {
+	pollEvery, answerWait = 25*time.Millisecond, 150*time.Millisecond
+}
+
+// testManager is a Manager with its own private tmux server, torn down after
+// the test.
+func testManager(t *testing.T) *Manager {
+	t.Helper()
+	bin := findTmux("")
+	if bin == "" {
+		t.Skip("tmux is not installed")
+	}
+	m := NewManager(bin, filepath.Join(t.TempDir(), "tmux.sock"))
+	t.Cleanup(m.StopAll)
+	return m
 }
 
 // in returns the full path of a folder inside the test app's allowed folder.
@@ -195,33 +215,36 @@ func waitFor(t *testing.T, ok func() bool) {
 // ---- processes ----
 
 func TestRunLifecycle(t *testing.T) {
-	m := NewManager()
+	m := testManager(t)
 	dir := t.TempDir()
 	r := &Run{Kind: "server", Account: "a", dir: dir}
-	if err := m.Start(r, []string{"/bin/sh", "-c", "echo Workspace not trusted; read x; echo got=$x"}, childEnv(dir), nil); err != nil {
+	if err := m.Start(r, []string{"/bin/sh", "-c", "printf 'Trust /x? [y/N] '; read x; echo got=$x; echo done"}, childEnv(dir), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Start(&Run{Kind: "server", Account: "a", dir: dir}, []string{"/bin/sh", "-c", "true"}, nil, nil); err == nil {
 		t.Error("duplicate run for same account and directory was allowed")
 	}
 	waitFor(t, func() bool { return r.View().Hint == "needs-trust" })
-	if err := r.Input("yes\r"); err != nil {
+	if err := r.Type("yes"); err != nil {
 		t.Fatal(err)
 	}
-	if h := r.View().Hint; h != "" {
-		t.Errorf("hint %q still showing after the prompt was answered", h)
+	if err := r.Press("Enter"); err != nil {
+		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return r.View().Done })
 	if !strings.Contains(r.Tail(), "got=yes") || r.View().ExitCode != 0 {
 		t.Errorf("output %q exit %d", r.Tail(), r.View().ExitCode)
 	}
-	if err := r.Input("late"); err == nil {
+	if h := r.View().Hint; h != "" {
+		t.Errorf("hint %q still showing after the process moved on", h)
+	}
+	if err := r.Type("late"); err == nil {
 		t.Error("input accepted after exit")
 	}
 }
 
 func TestStopKillsProcessGroup(t *testing.T) {
-	m := NewManager()
+	m := testManager(t)
 	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
 	if err := m.Start(r, []string{"/bin/sh", "-c", "sleep 60 & wait"}, nil, nil); err != nil {
 		t.Fatal(err)
@@ -231,7 +254,7 @@ func TestStopKillsProcessGroup(t *testing.T) {
 }
 
 func TestScreenEscapesProcessOutput(t *testing.T) {
-	m := NewManager()
+	m := testManager(t)
 	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
 	if err := m.Start(r, []string{"/bin/sh", "-c", `printf '\033[31m<script>alert(1)</script>\033[0m & "q"\n'`}, nil, nil); err != nil {
 		t.Fatal(err)
@@ -263,7 +286,7 @@ func TestServerRestartsOnlyWhenItDiesOnItsOwn(t *testing.T) {
 		t.Errorf("unexpected command line: %s", first.Tail())
 	}
 
-	syscall.Kill(-first.cmd.Process.Pid, syscall.SIGKILL) // dies on its own
+	syscall.Kill(-first.pid(), syscall.SIGKILL) // dies on its own
 	waitFor(t, func() bool { return len(servers(a)) == 2 })
 	second := a.mgr.Get(servers(a)[0].ID)
 	if second.Restarts != 1 || !second.alive() {
@@ -425,7 +448,7 @@ func TestWrongCodeLeavesAccountSignedOut(t *testing.T) {
 }
 
 func TestKeysAreLimited(t *testing.T) {
-	m := NewManager()
+	m := testManager(t)
 	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
 	if err := m.Start(r, []string{"/bin/cat"}, nil, nil); err != nil {
 		t.Fatal(err)
@@ -634,23 +657,18 @@ func TestAbandonedSignInExpires(t *testing.T) {
 	}
 }
 
-func TestGarbageOutputCannotCrashSuperdeck(t *testing.T) {
-	m := NewManager()
-	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
-	if err := m.Start(r, []string{"/bin/sh", "-c", "head -c 200000 /dev/urandom; printf '\\033[999999;999999H\\033[9999999A\\033[?1049h\\033[2J\\033]0;'; head -c 5000 /dev/urandom"}, nil, nil); err != nil {
-		t.Fatal(err)
+func TestColourCodesBecomeEscapedHTML(t *testing.T) {
+	got := string(ansiToHTML("\x1b[1;31m<b>&\x1b[0m plain \x1b[38;5;46mgreen\x1b[39m \x1b[38;2;1;2;3mrgb\x1b[0m\x1b[2J\x1b]0;title\x07 end"))
+	want := `<span style="color:#ff6b5e;font-weight:700;">&lt;b&gt;&amp;</span> plain <span style="color:#00ff00;">green</span> <span style="color:#010203;">rgb</span> end`
+	if got != want {
+		t.Errorf("ansiToHTML:\n got %s\nwant %s", got, want)
 	}
-	waitFor(t, func() bool { return r.View().Done })
-	for _, size := range [][2]int{{1, 1}, {300, 100}, {46, 24}} {
-		r.mu.Lock()
-		r.done = false // let Resize through for the purpose of the test
-		r.mu.Unlock()
-		r.Resize(size[0], size[1])
-		_ = r.Screen()
+	// Nonsense must not panic or produce markup of its own.
+	for _, junk := range []string{"\x1b[", "\x1b[38;5m", "\x1b[38;2;999m", "\x1b[;;;m<script>", strings.Repeat("\x1b[31m", 5000)} {
+		if out := string(ansiToHTML(junk)); strings.Contains(out, "<script>") {
+			t.Errorf("unescaped output for %q", junk)
+		}
 	}
-	r.mu.Lock()
-	r.done = true
-	r.mu.Unlock()
 }
 
 func TestSignedOutSoonAfterStartupIsRetried(t *testing.T) {
@@ -860,4 +878,50 @@ func TestOldFilesAreImportedOnce(t *testing.T) {
 	if got := a.accountList(); len(got) != 3 {
 		t.Errorf("new directory not adopted: %+v", got)
 	}
+}
+
+func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
+	a := testApp(t)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
+	pid := run.pid()
+
+	// Superdeck goes away without stopping anything, and a new one starts.
+	a.closing.Store(true)
+	next := newApp(a.roots, a.state, a.claude)
+	next.adopt()
+	next.restore()
+
+	got := servers(next)
+	if len(got) != 1 || got[0].ID != run.ID || got[0].Done {
+		t.Fatalf("after restart: %+v", got)
+	}
+	same := next.mgr.Get(run.ID)
+	if same.pid() != pid {
+		t.Errorf("the Claude process was replaced: pid %d, was %d", same.pid(), pid)
+	}
+	waitFor(t, func() bool { return strings.Contains(same.Tail(), "serving") && same.View().Link != "" })
+
+	// The new Superdeck is fully in charge of it: it can stop it.
+	same.Stop()
+	waitFor(t, func() bool { return !same.alive() })
+	if live, _ := next.data().LiveRuns(); len(live) != 0 {
+		t.Errorf("stopped run still recorded as live: %+v", live)
+	}
+}
+
+func TestInstancesAreRelaunchedIfTmuxItselfDies(t *testing.T) {
+	minLife, restartBase = 0, 10*time.Millisecond
+	a := testApp(t)
+	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(first.Tail(), "serving") })
+	a.mgr.tmux("kill-server") // as after a reboot, or if tmux crashed
+	waitFor(t, func() bool { return len(servers(a)) == 2 && !servers(a)[0].Done })
 }

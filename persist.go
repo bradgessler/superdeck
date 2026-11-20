@@ -66,8 +66,19 @@ func (a *App) importLegacy() {
 	}
 }
 
-// restore relaunches every remembered instance. Each one goes through the
-// same validation as a fresh launch, so a hand-edited file gains nothing.
+// running reports whether an instance for this account and folder is alive.
+func (a *App) running(accountID, folder string) bool {
+	for _, v := range a.mgr.List() {
+		if v.Kind == "server" && !v.Done && v.Account == accountID && v.Project == folder {
+			return true
+		}
+	}
+	return false
+}
+
+// restore launches every remembered instance that is not already running, for
+// example after the Mac has rebooted. Each one goes through the same
+// validation as a fresh launch, so edited data gains nothing.
 func (a *App) restore() {
 	for _, w := range a.loadWanted() {
 		if !filepath.IsAbs(w.Project) && len(a.roots) > 0 {
@@ -76,6 +87,9 @@ func (a *App) restore() {
 			w.Project = filepath.Join(a.roots[0], w.Project)
 			a.remember(old, false)
 			a.remember(w, true)
+		}
+		if a.running(w.Account, w.Project) {
+			continue // tmux kept it going while Superdeck was away
 		}
 		if _, err := a.startServer(w.Account, w.Project, w.Spawn, w.Capacity, 0); err != nil {
 			log.Printf("could not bring back %s as %s: %v", w.Project, w.Account, err)
@@ -112,6 +126,8 @@ func launchAgent(binary string, args []string, logPath, path string) string {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
   <true/>
   <key>ProcessType</key>
   <string>Interactive</string>

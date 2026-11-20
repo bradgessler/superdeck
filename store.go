@@ -160,3 +160,49 @@ func (s *Store) SetWanted(w wanted, keep bool) error {
 		w.Account, w.Project, w.Spawn, w.Capacity)
 	return err
 }
+
+// SaveRun records a process when it starts.
+func (s *Store) SaveRun(r *Run) error {
+	_, err := s.db.Exec(`INSERT INTO runs (id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Kind, r.Account, r.Project, r.dir, r.Name, r.spawn, r.capacity, r.Version, r.Restarts, r.Started.Format(time.RFC3339))
+	return err
+}
+
+// MarkStopped records that a person asked for a process to stop.
+func (s *Store) MarkStopped(id string) error {
+	_, err := s.db.Exec(`UPDATE runs SET stopped = 1 WHERE id = ?`, id)
+	return err
+}
+
+// EndRun records that a process has exited.
+func (s *Store) EndRun(id string, code int) error {
+	_, err := s.db.Exec(`UPDATE runs SET ended_at = datetime('now'), exit_code = ? WHERE id = ? AND ended_at IS NULL`, code, id)
+	return err
+}
+
+// LiveRuns returns the processes that had not exited when Superdeck last knew.
+func (s *Store) LiveRuns() ([]*Run, error) {
+	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped
+		FROM runs WHERE ended_at IS NULL ORDER BY started_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r := &Run{}
+		var started string
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Account, &r.Project, &r.dir, &r.Name, &r.spawn, &r.capacity, &r.Version, &r.Restarts, &started, &r.stopped); err != nil {
+			return nil, err
+		}
+		r.Started, _ = time.Parse(time.RFC3339, started)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Prune forgets processes that ended more than a week ago.
+func (s *Store) Prune() {
+	s.db.Exec(`DELETE FROM runs WHERE ended_at IS NOT NULL AND ended_at < datetime('now', '-7 days')`)
+}

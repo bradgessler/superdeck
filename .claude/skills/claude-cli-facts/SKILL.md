@@ -20,7 +20,7 @@ Seen on macOS with Claude Code 2.1.296 to 2.1.329. These are observations, not g
 
 ## Remote Control
 
-- `claude remote-control` needs a pseudo-terminal.
+- `claude remote-control` needs a terminal. It runs correctly inside a detached tmux session started by a launchd agent, including Keychain access.
 - With one attached, an untrusted folder produces a prompt ending `Trust <path>? [y/N]` rather than exiting. Without a terminal it exits with `Workspace not trusted` (documented).
 - Once trusted, the trust is remembered in that account's config and later launches go straight through.
 - When connected it prints a block containing `Connected`, `Capacity: 1/4`, and `Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_...`. Superdeck turns that link into the "Open in Claude" button. The environment id stayed the same across restarts.

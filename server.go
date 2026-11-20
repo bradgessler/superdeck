@@ -47,8 +47,35 @@ type App struct {
 }
 
 func newApp(roots []string, state, claude string) *App {
-	return &App{roots: roots, state: state, claude: claude, mgr: NewManager(), started: time.Now(),
+	a := &App{roots: roots, state: state, claude: claude, started: time.Now(),
 		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{}}
+	a.mgr = NewManager(findTmux(""), filepath.Join(state, "tmux.sock"))
+	// Every process is recorded, so a restarted Superdeck knows what tmux is holding.
+	a.mgr.onStart = func(r *Run) {
+		if err := a.data().SaveRun(r); err != nil {
+			log.Printf("recording %s: %v", r.Name, err)
+		}
+	}
+	a.mgr.onStop = func(r *Run) { a.data().MarkStopped(r.ID) }
+	a.mgr.onEnd = func(r *Run) { a.data().EndRun(r.ID, r.View().ExitCode) }
+	return a
+}
+
+// findTmux locates tmux, looking in the usual Homebrew places as well as PATH
+// because launchd starts programs with a short PATH.
+func findTmux(given string) string {
+	if given != "" {
+		return given
+	}
+	if p, err := exec.LookPath("tmux"); err == nil {
+		return p
+	}
+	for _, p := range []string{"/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -56,6 +83,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
 	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for per-account Claude config")
 	claude := flag.String("claude", "", "path to the claude binary (default: found on PATH)")
+	tmuxBin := flag.String("tmux", "", "path to the tmux binary (default: found on PATH)")
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
 	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Superdeck at login with these settings, then exit")
 	flag.Usage = func() {
@@ -84,12 +112,15 @@ func main() {
 		log.Fatal(err)
 	}
 	a := newApp(roots, *state, p)
+	if a.mgr.bin = findTmux(*tmuxBin); a.mgr.bin == "" {
+		log.Fatal("tmux is not installed. Superdeck uses it to keep Claude running across restarts. Install it with: brew install tmux")
+	}
 	if *agent {
 		self, err := os.Executable()
 		if err != nil {
 			log.Fatal(err)
 		}
-		args := []string{"-addr", *addr, "-state", a.state, "-claude", a.claude}
+		args := []string{"-addr", *addr, "-state", a.state, "-claude", a.claude, "-tmux", a.mgr.bin}
 		if *extra != "" {
 			args = append(args, "-hosts", *extra)
 		}
@@ -118,9 +149,10 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		log.Print("stopping claude processes")
+		// Claude processes are held by tmux and keep running. Superdeck
+		// picks them up again when it next starts.
+		log.Print("superdeck stopping; instances keep running")
 		a.closing.Store(true)
-		a.mgr.StopAll()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
@@ -130,6 +162,7 @@ func main() {
 		log.Printf("allowed folder: %s", root)
 	}
 	log.Print("no sign-in yet: anyone who can reach this address can use it")
+	a.adopt()
 	go a.restore()
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

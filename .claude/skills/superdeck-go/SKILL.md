@@ -18,11 +18,14 @@ Superdeck's safety is that it can only run a short list of commands. Keep it tha
 
 ## Supervision
 
-- One `Run` per process, attached to a pseudo-terminal (`creack/pty`). Claude needs one; plain pipes do not work.
+- One `Run` per process. Each lives in its own tmux session on a private tmux server (`-S <state>/tmux.sock`), not as a child of Superdeck, so it survives Superdeck restarting. Claude needs a terminal; plain pipes do not work.
+- Superdeck never stops instances when it exits. On start, `adopt` reads the `runs` table and takes over whatever tmux is still holding; `restore` launches remembered instances that are not running.
+- tmux is given the command as separate arguments after `--`, which it executes directly. Never build a command string for it. The process is started through `env -i` with exactly the environment from `childEnv`.
+- State is read by polling tmux (`display-message` for dead/exit status, `capture-pane` for text). `remain-on-exit` keeps a finished pane long enough to read its exit status and output; when a pane dies tmux scrolls the top line away, so read with scrollback.
+- A question is only a question while it is the last line on the screen, and its kind is read from that line alone: an answered question can still be visible above.
 - The terminal is wide (200 columns) on purpose, so Claude never breaks a link or path across lines. The page wraps text.
 - Restart rules live in `serverExited`. An instance that dies on its own is restarted with backoff. One that a person stopped, that failed within `minLife`, or that is waiting on sign-in or trust is not, because that would loop. Keep both halves tested.
-- Third-party parsing of process output (the terminal emulator) is wrapped in `recover`. A panic there degrades one process to plain text; it must never take Superdeck down, because every instance dies with it.
-- Launched instances are remembered in `instances.json` and relaunched by `restore`. Entries go through the same validation as a fresh launch.
+- Launched instances are remembered in the `instances` table. Entries go through the same validation as a fresh launch.
 
 ## Data and migrations
 
@@ -34,7 +37,7 @@ Superdeck's safety is that it can only run a short list of commands. Keep it tha
 
 ## Conventions
 
-- Standard library first. Current dependencies: `creack/pty`, `hinshun/vt10x`, `modernc.org/sqlite`, `pressly/goose`.
+- Standard library first. Current dependencies: `modernc.org/sqlite`, `pressly/goose`, and the `tmux` binary at run time.
 - `gofmt`, `go vet`, and `go test -race ./...` clean before committing.
 - Errors shown to a person are lower-case sentences without a full stop; `fail()` in `web.go` formats them.
 - Comments explain why, especially for anything that looks odd.
@@ -42,7 +45,7 @@ Superdeck's safety is that it can only run a short list of commands. Keep it tha
 
 ## Testing
 
-- `fakeClaude` in `superdeck_test.go` is a shell script that stands in for the CLI. It is driven by marker files in the account's config directory. Tests need no Claude account.
+- `fakeClaude` in `superdeck_test.go` is a shell script that stands in for the CLI. It is driven by marker files in the account's config directory. Tests need no Claude account, but they do need tmux, and each test gets its own tmux server.
 - Test the refusal as well as the success: bad names, paths outside the allowed folders, keys not on the list.
 - Tuning values that tests shorten (`minLife`, `restartBase`, `loginTimeout`, `bootRetry`) are package variables.
 - When real Claude behaves differently from the stand-in, fix the stand-in first, then the code.

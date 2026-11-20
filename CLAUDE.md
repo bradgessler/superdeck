@@ -29,7 +29,7 @@ These came from the person who owns this project. Treat them as requirements.
 | `server.go` | `main`, flags, the request guard, account status |
 | `web.go` | routes, page handlers, view models |
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
-| `proc.go` | one supervised process: pseudo-terminal, terminal emulator, prompt detection |
+| `proc.go` | one supervised process held in tmux: reading its screen, sending keys, prompt detection |
 | `paths.go` | allowed folders, folder listing, path confinement |
 | `store.go` | the SQLite store and migration runner |
 | `migrations/` | numbered SQL schema changes, compiled into the binary |
@@ -50,7 +50,7 @@ go build -o superdeck . && ./superdeck ~/Projects
 - Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
 - Look at a changed screen in a browser at phone width and desktop width before calling it done.
-- **Restarting Superdeck restarts every instance** and interrupts the sessions they host. Before restarting a copy someone is using, check for a sign-in in progress (`pgrep -f 'claude auth login'`) and say that you are about to restart.
+- Restarting Superdeck does not touch instances: tmux holds them. Stopping the private tmux server (`tmux -S ~/.superdeck/tmux.sock kill-server`) does end them all, so do not do that on a copy someone is using.
 - Never trust a folder or accept a consent prompt on the owner's behalf while testing against real Claude. Stop at the prompt.
 - Do not put real email addresses, host names or home-directory paths in the repository. Use the stand-in for screenshots.
 

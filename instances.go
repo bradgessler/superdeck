@@ -19,9 +19,9 @@ import (
 // The browser cannot type into a Claude process. It can press one of these
 // named keys, or, for a sign-in only, submit a code in a narrow alphabet.
 var (
-	keys = map[string]string{
-		"enter": "\r", "y": "y", "n": "n", "1": "1", "2": "2", "3": "3",
-		"up": "\x1b[A", "down": "\x1b[B", "esc": "\x1b",
+	keys = map[string]struct{ text, named string }{
+		"enter": {named: "Enter"}, "up": {named: "Up"}, "down": {named: "Down"}, "esc": {named: "Escape"},
+		"y": {text: "y"}, "n": {text: "n"}, "1": {text: "1"}, "2": {text: "2"}, "3": {text: "3"},
 	}
 	codeRe = regexp.MustCompile(`^[A-Za-z0-9_.~#+/=-]{4,1000}$`)
 )
@@ -34,6 +34,7 @@ var (
 
 	loginTimeout = 15 * time.Minute
 	bootRetry    = 30 * time.Second
+	answerWait   = 700 * time.Millisecond
 )
 
 // An account is a Claude config directory plus the name shown for it. Claude
@@ -197,7 +198,7 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 		"--spawn", spawn, "--capacity", strconv.Itoa(capacity)}
 	run := &Run{Kind: "server", Account: accountID, Project: dir, Name: name,
 		Version: a.claudeVersion(), Restarts: restarts, dir: dir, spawn: spawn, capacity: capacity}
-	if err := a.mgr.Start(run, argv, childEnv(cfg), a.serverExited); err != nil {
+	if err := a.mgr.Start(run, argv, childEnv(cfg), a.exitHook(run)); err != nil {
 		return nil, err
 	}
 	return run, nil
@@ -306,48 +307,37 @@ func (a *App) startLogin(accountID string) (*Run, error) {
 		return nil, err
 	}
 	run := &Run{Kind: "login", Account: accountID, Name: "Sign in " + a.accountName(accountID), dir: dir}
-	err = a.mgr.Start(run, []string{a.claude, "auth", "login", "--claudeai"}, childEnv(dir),
-		func(*Run) { a.refreshStatus(accountID) })
-	if err != nil {
+	if err := a.mgr.Start(run, []string{a.claude, "auth", "login", "--claudeai"}, childEnv(dir), a.exitHook(run)); err != nil {
 		return nil, err
 	}
-	// An abandoned sign-in should not sit there forever.
-	time.AfterFunc(loginTimeout, func() {
-		if run.alive() {
-			run.Stop()
-		}
-	})
+	a.expire(run)
 	return run, nil
 }
 
 // startUpdate runs Anthropic's own `claude update`. It never runs unasked.
 func (a *App) startUpdate() (*Run, error) {
 	run := &Run{Kind: "update", Name: "Update Claude Code", Version: a.claudeVersion(), dir: a.state}
-	err := a.mgr.Start(run, []string{a.claude, "update"}, childEnv(""), func(*Run) {
-		a.verMu.Lock()
-		a.verAt = time.Time{}
-		a.verMu.Unlock()
-	})
-	if err != nil {
+	if err := a.mgr.Start(run, []string{a.claude, "update"}, childEnv(""), a.exitHook(run)); err != nil {
 		return nil, err
 	}
 	return run, nil
 }
 
 // answer replies yes or no to a question Claude is asking. Some prompts take
-// a single keypress and some want Enter after it, so Enter is sent only if
-// nothing but the echoed letter has appeared since.
+// a single keypress and some want Enter after it, so Enter is sent only if the
+// question is still the last thing on the screen a moment later.
 func answer(run *Run, yes bool) error {
 	k := "n"
 	if yes {
 		k = "y"
 	}
-	if err := run.Input(k); err != nil {
+	if err := run.Type(k); err != nil {
 		return err
 	}
-	time.Sleep(700 * time.Millisecond)
-	if t := strings.TrimSpace(run.Tail()); run.alive() && (t == "" || strings.EqualFold(t, k)) {
-		return run.Input("\r")
+	time.Sleep(answerWait)
+	run.read()
+	if run.alive() && askRe.MatchString(lastLines(run.Tail(), 1)) {
+		return run.Press("Enter")
 	}
 	return nil
 }
@@ -358,7 +348,10 @@ func pressKey(run *Run, key string) error {
 	if !ok {
 		return errors.New("that key is not allowed")
 	}
-	return run.Input(k)
+	if k.named != "" {
+		return run.Press(k.named)
+	}
+	return run.Type(k.text)
 }
 
 // submitCode hands a sign-in code to a waiting `claude auth login`.
@@ -367,5 +360,63 @@ func submitCode(run *Run, code string) error {
 	if run.Kind != "login" || !codeRe.MatchString(code) {
 		return errors.New("that does not look like a sign-in code")
 	}
-	return run.Input(code + "\r")
+	if err := run.Type(code); err != nil {
+		return err
+	}
+	return run.Press("Enter")
+}
+
+// exitHook is what to do when a run of this kind exits. It is chosen by kind
+// so that a run adopted after a restart behaves the same as a fresh one.
+func (a *App) exitHook(r *Run) func(*Run) {
+	switch r.Kind {
+	case "server":
+		return a.serverExited
+	case "login":
+		account := r.Account
+		return func(*Run) { a.refreshStatus(account) }
+	case "update":
+		return func(*Run) {
+			a.verMu.Lock()
+			a.verAt = time.Time{}
+			a.verMu.Unlock()
+		}
+	}
+	return nil
+}
+
+// expire cancels a sign-in that has been left waiting too long.
+func (a *App) expire(run *Run) {
+	left := loginTimeout - time.Since(run.Started)
+	if left < 0 {
+		left = 0
+	}
+	time.AfterFunc(left, func() {
+		if run.alive() {
+			run.Stop()
+		}
+	})
+}
+
+// adopt picks up the processes that were running when Superdeck last exited.
+// The ones tmux is still holding carry on untouched; the ones that are gone
+// are recorded as ended.
+func (a *App) adopt() {
+	runs, err := a.data().LiveRuns()
+	if err != nil {
+		log.Printf("reading running processes: %v", err)
+		return
+	}
+	for _, r := range runs {
+		if !a.mgr.Holding(r) {
+			a.data().EndRun(r.ID, -1)
+			continue
+		}
+		a.mgr.Adopt(r, a.exitHook(r))
+		if r.Kind == "login" {
+			a.expire(r)
+		}
+		log.Printf("still running: %s", r.Name)
+	}
+	a.data().Prune()
 }

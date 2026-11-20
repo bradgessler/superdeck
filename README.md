@@ -19,7 +19,7 @@ Superdeck is a small web application served by one Go binary on your Mac. You op
 - **Accounts.** Each account has its own Claude config directory (`CLAUDE_CONFIG_DIR`), so several can be signed in side by side. Adding one runs Anthropic's `claude auth login`: you open Anthropic's page, sign in, and paste the code back.
 - **Questions.** When Claude asks something on first run, such as whether to trust a folder, Superdeck shows the question with buttons. A yes/no question it does not recognise is shown in Claude's own words.
 - **Moving.** When one account runs out of usage, move an instance to another: it stops under the first account and launches in the same folder under the second. Files stay; the conversation does not carry over.
-- **Staying up.** An instance that dies on its own is restarted with a growing delay. Instances you launched are remembered and brought back when Superdeck itself restarts.
+- **Staying up.** Claude runs in tmux, not inside Superdeck, so instances keep running while Superdeck restarts or is upgraded. An instance that dies on its own is restarted with a growing delay, and instances you launched are brought back after a reboot.
 - **Updates.** The home screen shows the installed Claude Code version and a "Check for updates" link that runs `claude update`. Nothing updates on its own. An instance still running an older version offers to relaunch.
 
 <p>
@@ -34,9 +34,21 @@ The screenshots use sample data.
 
 Everything is rendered on the server with Go's `html/template`. The only script in the browser is [htmx](https://htmx.org), one vendored file, which refreshes status fragments and filters the folder list. Every screen also works as plain links and forms.
 
-Claude runs under a pseudo-terminal. Superdeck keeps a terminal emulator on the server for each process and shows its screen as escaped HTML in a collapsed "Output" section, for when you need to see what Claude printed.
+Each Claude process runs in its own [tmux](https://github.com/tmux/tmux) session on a private tmux server, separate from any tmux you use yourself. Superdeck reads the screen from tmux and sends keys through it, and records each process in its database so that after a restart it knows what tmux is holding. The Terminal screen shows that screen as escaped HTML.
 
-Dependencies: [creack/pty](https://github.com/creack/pty) for the pseudo-terminal, [hinshun/vt10x](https://github.com/hinshun/vt10x) for terminal emulation, [modernc.org/sqlite](https://modernc.org/sqlite) (SQLite in pure Go, so the binary stays self-contained) and [pressly/goose](https://github.com/pressly/goose) for migrations. No Node, no build step for the front end.
+You can also attach to an instance's real terminal on the Mac. List the sessions, then attach to one:
+
+```bash
+tmux -S ~/.superdeck/tmux.sock list-sessions
+```
+
+```bash
+tmux -S ~/.superdeck/tmux.sock attach -t sd-0123456789ab
+```
+
+Detach with `Ctrl-b d`. Typing there goes straight to Claude.
+
+Needs tmux on the Mac (`brew install tmux`). Go dependencies: [modernc.org/sqlite](https://modernc.org/sqlite) (SQLite in pure Go, so the binary stays self-contained) and [pressly/goose](https://github.com/pressly/goose) for migrations. No Node, no build step for the front end.
 
 ## Run it
 
@@ -74,13 +86,13 @@ This prints a launchd agent for the settings you pass.
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.bradgessler.superdeck.plist
 ```
 
-launchd then restarts Superdeck if it exits, and Superdeck relaunches the instances it remembers. To remove it:
+launchd then restarts Superdeck if it exits. Instances keep running throughout and Superdeck picks them up again. To remove it:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.github.bradgessler.superdeck
 ```
 
-State lives in `~/.superdeck`: a SQLite database (`superdeck.db`) holding accounts and the instances to bring back, one Claude config directory per account, and a log.
+State lives in `~/.superdeck`: a SQLite database (`superdeck.db`) holding accounts, the instances to bring back and the processes tmux is holding; one Claude config directory per account; the tmux socket; and a log.
 
 ### Upgrading
 
@@ -92,7 +104,7 @@ Superdeck can start processes on your Mac. It has no sign-in. The model is: it c
 
 The worst someone who reaches the page should be able to do is launch Claude instances in the folders you allowed, answer Claude's yes/no questions, start a sign-in, and stop, relaunch or move what is running.
 
-- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell.
+- **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell. tmux is given those arguments separately and executes them directly.
 - **No typing into Claude.** The page cannot send text to a process. It can answer yes or no, or press one of nine named keys (Enter, y, n, 1, 2, 3, Up, Down, Esc). The one exception is a sign-in, which accepts a single code made of letters, digits and `_.~#+/=-`.
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
 - **Confined folders.** A folder must be one you named on the command line, or inside one, after symlinks are resolved.
@@ -107,7 +119,8 @@ Not built: sign-in, TLS.
 
 | Failure | What Superdeck does |
 |---|---|
-| Superdeck crashes or is killed | launchd restarts it. Its Claude processes die with it, and the instances you had launched are relaunched. Conversations they were hosting are interrupted. |
+| Superdeck crashes, is killed or is upgraded | launchd restarts it. The Claude processes are held by tmux and are not touched; Superdeck finds them again and carries on. Verified by killing Superdeck and checking Claude kept the same process id. |
+| tmux itself dies, or the Mac reboots | The instances are gone. Superdeck notices and relaunches the ones you had launched. |
 | A Claude instance dies on its own | Restarted after 5 seconds, doubling up to 5 minutes, at most 8 times in a row. |
 | An instance fails within 30 seconds of starting | Left stopped and marked failed, with its output shown. Restarting would only loop. |
 | An account is signed out | The instance stops and says so. It is not restarted. Right after the Mac starts, a signed-out report is retried three times first, in case the Keychain was not readable yet. |
@@ -129,7 +142,7 @@ Not built: sign-in, TLS.
 | 5 | Does each instance show up in the Claude app under the right account only? | **Open.** |
 | 6 | After a network outage longer than ten minutes, when the server exits by design, does the restart bring it back cleanly? | **Open.** Restart logic is tested against a stand-in. |
 | 7 | Does `claude update` behave when run from here? | **Open.** |
-| 8 | Can instances survive a Superdeck restart instead of being relaunched? | **Open.** Not built. |
+| 8 | Can instances survive a Superdeck restart instead of being relaunched? | **Yes.** They run in tmux. |
 | 9 | Is passing a sign-in code through this page within Anthropic's terms for third-party tools? | **Open.** Superdeck hands the code straight to the official binary and stores nothing. Read the [terms](https://code.claude.com/docs/en/legal-and-compliance). |
 
 On Team and Enterprise plans an owner has to turn Remote Control on before any of this works.
