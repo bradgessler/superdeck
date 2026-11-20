@@ -1,0 +1,20 @@
+{{template "head" .}}
+<a class="backlink" href="/instances/{{.I.ID}}">‹ {{.I.Title}}</a>
+<h1>Move to another account</h1>
+<p class="lede">Stops {{.I.Title}} under {{.I.Account}} and launches it in the same folder under the account you pick. Files on disk stay as they are. The conversation does not carry over.</p>
+<div class="rows">
+  {{range .Others}}
+  <form method="post" action="/instances/{{$.I.ID}}/move">
+    <button name="account" value="{{.ID}}"{{if not .SignedIn}} disabled{{end}}>
+      <span class="led{{if .SignedIn}} on{{end}}"></span>
+      <span class="row-body">
+        <span class="row-title">{{.Name}}</span>
+        <span class="row-sub">{{.Who}}</span>
+      </span>
+    </button>
+  </form>
+  {{else}}
+  <div class="empty"><b>There is no other account.</b><a class="link" href="/accounts/new">Add one</a> to move instances to it.</div>
+  {{end}}
+</div>
+{{template "foot" .}}

@@ -762,3 +762,34 @@ func TestNewFolderOnlyInsideAllowedFolders(t *testing.T) {
 		}
 	}
 }
+
+func TestMoveInstanceToAnotherAccount(t *testing.T) {
+	a := testApp(t)
+	os.MkdirAll(filepath.Join(a.state, "accounts", "spare"), 0o700)
+	os.WriteFile(filepath.Join(a.state, "accounts", "spare", "in"), nil, 0o600)
+
+	w := do(a, "POST", "/instances", url.Values{"account": {"work"}, "folder": {in(a, "app")}}, same)
+	loc := w.Header().Get("Location")
+	old := a.mgr.Get(strings.TrimPrefix(loc, "/instances/"))
+	waitFor(t, func() bool { return strings.Contains(old.Tail(), "serving") })
+
+	page := do(a, "GET", loc+"/move", nil, "").Body.String()
+	if !strings.Contains(page, `value="spare"`) || strings.Contains(page, `value="work"`) {
+		t.Errorf("move screen should offer the other accounts only: %s", page)
+	}
+	// A signed-out account and the current account are both refused.
+	for _, bad := range []string{"idle", "work", "nope", ""} {
+		w := do(a, "POST", loc+"/move", url.Values{"account": {bad}}, same)
+		if !strings.Contains(w.Header().Get("Location"), "error=") || !old.alive() {
+			t.Fatalf("move to %q: %q alive=%v", bad, w.Header().Get("Location"), old.alive())
+		}
+	}
+	w = do(a, "POST", loc+"/move", url.Values{"account": {"spare"}}, same)
+	moved := a.mgr.Get(strings.TrimPrefix(w.Header().Get("Location"), "/instances/"))
+	if moved == nil || moved.Account != "spare" || moved.Project != in(a, "app") || old.alive() {
+		t.Fatalf("move: %q old alive=%v", w.Header().Get("Location"), old.alive())
+	}
+	if want := a.loadWanted(); len(want) != 1 || want[0].Account != "spare" {
+		t.Errorf("after a restart it would come back under the wrong account: %+v", want)
+	}
+}

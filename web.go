@@ -45,6 +45,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /instances/{id}/code", a.doCode)
 	mux.HandleFunc("POST /instances/{id}/stop", a.doStop)
 	mux.HandleFunc("POST /instances/{id}/relaunch", a.doRelaunch)
+	mux.HandleFunc("GET /instances/{id}/move", a.pageMove)
+	mux.HandleFunc("POST /instances/{id}/move", a.doMove)
 	mux.HandleFunc("POST /update", a.doUpdate)
 	return a.guard(mux)
 }
@@ -663,6 +665,39 @@ func (a *App) doRelaunch(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "/instances/"+old.ID, err)
 		return
 	}
+	to(w, r, "/instances/"+run.ID)
+}
+
+// pageMove lets you pick another account to run an instance under.
+func (a *App) pageMove(w http.ResponseWriter, r *http.Request) {
+	run := a.run(w, r)
+	if run == nil {
+		return
+	}
+	iv := a.instance(run.View())
+	d := page(r, "Move "+iv.Title, "instances")
+	var others []accountView
+	for _, v := range a.accountViews("") {
+		if v.ID != run.Account {
+			others = append(others, v)
+		}
+	}
+	d["I"], d["Others"] = iv, others
+	render(w, "move.html", d)
+}
+
+func (a *App) doMove(w http.ResponseWriter, r *http.Request) {
+	old := a.run(w, r)
+	if old == nil {
+		return
+	}
+	run, err := a.move(old, r.FormValue("account"))
+	if err != nil {
+		fail(w, r, "/instances/"+old.ID+"/move", err)
+		return
+	}
+	a.remember(wanted{Account: old.Account, Project: old.Project}, false)
+	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	to(w, r, "/instances/"+run.ID)
 }
 

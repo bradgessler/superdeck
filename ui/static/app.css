@@ -225,3 +225,10 @@ input:focus { border-color: var(--amber); outline: none; }
 #live .lede { margin-bottom: 16px; }
 .stack .chip { font: 650 16px/1.45 var(--round); letter-spacing: 0; text-transform: none; color: var(--text); }
 .stack .chip:has(input:checked) { color: var(--amber-ink); }
+
+/* a row that is a button: whole row submits */
+.rows > form { padding: 0; }
+.rows > form > button { display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px 2px; text-align: left; }
+.rows > form > button:hover { background: rgba(255, 255, 255, .025); }
+.rows > form > button:disabled { opacity: .5; cursor: default; }
+.rows > .empty .link { display: inline; }

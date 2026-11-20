@@ -10,6 +10,7 @@
   {{else if .I.IsServer}}
   <form method="post" action="/instances/{{.I.ID}}/relaunch"><button class="btn big primary">Launch again</button></form>
   {{end}}
+  {{if .I.IsServer}}<a class="btn big" href="/instances/{{.I.ID}}/move">Move to another account</a>{{end}}
   <a class="btn big" href="/instances/{{.I.ID}}/output">Terminal</a>
 </div>
 {{template "foot" .}}

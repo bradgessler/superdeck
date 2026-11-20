@@ -256,7 +256,7 @@ func (a *App) accountStatus(name string) map[string]any {
 
 // tilde shortens a path under the home directory for display.
 func tilde(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home+string(filepath.Separator)) {
+	if home, err := os.UserHomeDir(); err == nil && (p == home || strings.HasPrefix(p, home+string(filepath.Separator))) {
 		return "~" + p[len(home):]
 	}
 	return p

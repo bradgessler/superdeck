@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -263,6 +264,31 @@ func (a *App) relaunch(old *Run) (*Run, error) {
 		}
 	}
 	return a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
+}
+
+// move stops an instance and launches the same folder under another account,
+// for when one account has run out of usage. The conversation does not carry
+// over; everything on disk does.
+func (a *App) move(old *Run, to string) (*Run, error) {
+	if old.Kind != "server" {
+		return nil, errors.New("only instances can be moved")
+	}
+	if to == old.Account {
+		return nil, errors.New("it is already running under that account")
+	}
+	if _, err := a.accountDir(to); err != nil {
+		return nil, err
+	}
+	if in, _ := a.accountStatus(to)["loggedIn"].(bool); !in {
+		return nil, fmt.Errorf("%s is signed out; sign it in first", a.accountName(to))
+	}
+	old.Stop()
+	for deadline := time.Now().Add(8 * time.Second); old.alive(); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			return nil, errors.New("the instance did not stop in time; try again")
+		}
+	}
+	return a.startServer(to, old.Project, old.spawn, old.capacity, 0)
 }
 
 // startLogin runs Anthropic's own `claude auth login` for one account. The

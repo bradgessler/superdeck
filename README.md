@@ -4,7 +4,13 @@ Start Claude Code Remote Control instances on a Mac from your phone, under more 
 
 Superdeck is a small web application served by one Go binary on your Mac. You open it, see what is running, and launch a new instance by picking an account and a folder. The Mac runs Anthropic's own `claude remote-control` in that folder, and you carry on the conversation in the official Claude app. Superdeck is a launcher, not a chat client.
 
-**Status: early.** Signing in two accounts, launching under launchd and recovering from a crash have been run for real on macOS with Claude Code 2.1.296. A full session through the Claude app has not been tested yet. Superdeck has no sign-in of its own and serves plain HTTP.
+**Status: early.** Signing in accounts, launching a connected instance, running under launchd and recovering from a crash have been run for real on macOS with Claude Code 2.1.296 to 2.1.329. A full session through the Claude app has not been tested yet. Superdeck has no sign-in of its own and serves plain HTTP.
+
+<p>
+  <img src="docs/screenshots/instances.jpg" width="230" alt="The home screen, listing two instances with their state">
+  <img src="docs/screenshots/new-instance.jpg" width="230" alt="Launching an instance: pick an account and a folder">
+  <img src="docs/screenshots/instance.jpg" width="230" alt="A connected instance with Open in Claude, Stop, Move and Terminal">
+</p>
 
 ## What it does
 
@@ -12,8 +18,17 @@ Superdeck is a small web application served by one Go binary on your Mac. You op
 - **New instance.** Pick an account and a folder: a Git repository, or a folder that holds several. In a repository, sessions started from the Claude app each get their own Git worktree. In a folder of repositories they share the folder.
 - **Accounts.** Each account has its own Claude config directory (`CLAUDE_CONFIG_DIR`), so several can be signed in side by side. Adding one runs Anthropic's `claude auth login`: you open Anthropic's page, sign in, and paste the code back.
 - **Questions.** When Claude asks something on first run, such as whether to trust a folder, Superdeck shows the question with buttons. A yes/no question it does not recognise is shown in Claude's own words.
+- **Moving.** When one account runs out of usage, move an instance to another: it stops under the first account and launches in the same folder under the second. Files stay; the conversation does not carry over.
 - **Staying up.** An instance that dies on its own is restarted with a growing delay. Instances you launched are remembered and brought back when Superdeck itself restarts.
 - **Updates.** The home screen shows the installed Claude Code version and a "Check for updates" link that runs `claude update`. Nothing updates on its own. An instance still running an older version offers to relaunch.
+
+<p>
+  <img src="docs/screenshots/question.jpg" width="230" alt="Claude asking whether to trust a folder, shown as a question with buttons">
+  <img src="docs/screenshots/sign-in.jpg" width="230" alt="Signing in an account: a link to Anthropic's page and a box for the code">
+  <img src="docs/screenshots/move.jpg" width="230" alt="Choosing another account to move an instance to">
+</p>
+
+The screenshots use sample data.
 
 ## How it is built
 
@@ -71,7 +86,7 @@ State lives in `~/.superdeck`: one directory per account, the list of instances 
 
 Superdeck can start processes on your Mac. It has no sign-in. The model is: it can only do a short, fixed list of things, and you keep it reachable only from a private network.
 
-The worst someone who reaches the page should be able to do is launch Claude instances in your project folders, answer Claude's yes/no questions, start a sign-in, and stop or relaunch what is running.
+The worst someone who reaches the page should be able to do is launch Claude instances in the folders you allowed, answer Claude's yes/no questions, start a sign-in, and stop, relaunch or move what is running.
 
 - **Fixed commands.** It runs only `claude remote-control`, `claude auth login`, `claude auth status`, `claude update`, `claude --version` and `git init`, with arguments it builds itself and passes as a list, never through a shell.
 - **No typing into Claude.** The page cannot send text to a process. It can answer yes or no, or press one of nine named keys (Enter, y, n, 1, 2, 3, Up, Down, Esc). The one exception is a sign-in, which accepts a single code made of letters, digits and `_.~#+/=-`.
@@ -106,7 +121,7 @@ Not built: sign-in, TLS.
 | 1 | Can an account be signed in through the page, with the code pasted back? | **Yes.** Done for two accounts. |
 | 2 | Do two accounts stay separate? | **Yes for sign-in.** Each gets its own Keychain entry, keyed to its config directory's path. That is why an account's directory never moves. Running two instances at once under different accounts is untested. |
 | 3 | Does it work when launchd starts it, including Keychain access? | **Yes.** |
-| 4 | With a pseudo-terminal, do first-run prompts appear instead of the process exiting? | **Yes for folder trust**, which asks `Trust <path>? [y/N]`. Whether further prompts follow is untested. |
+| 4 | With a pseudo-terminal, do first-run prompts appear instead of the process exiting? | **Yes.** Folder trust asks `Trust <path>? [y/N]`; after answering, the instance connected with no further prompt. |
 | 5 | Does each instance show up in the Claude app under the right account only? | **Open.** |
 | 6 | After a network outage longer than ten minutes, when the server exits by design, does the restart bring it back cleanly? | **Open.** Restart logic is tested against a stand-in. |
 | 7 | Does `claude update` behave when run from here? | **Open.** |
@@ -122,6 +137,8 @@ go test -race ./...
 ```
 
 Tests run against a shell-script stand-in for the Claude CLI, so they need no account.
+
+`CLAUDE.md` and the skills in `.claude/skills` hold the working rules for this project: how screens should look, what may run in the browser, Go and supervision conventions, and what has been observed about the Claude CLI. Read them before changing things, whether you are a person or an agent.
 
 htmx 2.0.4 is vendored unmodified in `ui/static/htmx.min.js` under its 0BSD license.
 
