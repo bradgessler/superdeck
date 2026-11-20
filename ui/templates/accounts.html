@@ -16,4 +16,5 @@
 <div class="actions">
   <a class="btn big primary" href="/accounts/new">Add account</a>
 </div>
+{{if .Checking}}<div hx-get="/refresh" hx-trigger="load delay:2s" hx-swap="none"></div>{{end}}
 {{template "foot" .}}

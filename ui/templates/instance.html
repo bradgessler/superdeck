@@ -43,6 +43,9 @@
     <button class="btn big risky">{{if .I.IsServer}}Stop instance{{else}}Cancel{{end}}</button>
   </form>
   {{end}}
+  {{if .I.Restarting}}
+  <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big risky">Don't restart it</button></form>
+  {{end}}
 </div>
 {{if or .I.Live .I.Restarting}}<div hx-get="/instances/{{.I.ID}}/watch?sig={{.I.Sig}}" hx-trigger="every 1s" hx-swap="none"></div>{{end}}
 {{template "foot" .}}

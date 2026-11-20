@@ -117,18 +117,21 @@ What the restrictions below do buy is that reaching the page gives no shortcut a
 - **Validated names.** Account names and new folder names are checked against strict patterns before they reach a command line.
 - **Listed folders only.** An instance can be launched only in a folder Superdeck lists: a Git repository, or a folder holding repositories, at or inside a folder you named on the command line, after symlinks are resolved. Hidden folders and the insides of repositories are not offered.
 - **Escaped output.** Everything a process prints is HTML-escaped before it is shown. The sign-in button only ever points at an Anthropic address.
-- **No cross-site driving.** Every request must carry an expected `Host` header, every state-changing request must be same-origin, and cross-site reads are refused, so a web page elsewhere cannot drive or probe Superdeck through your browser.
+- **No cross-site driving.** Every request must carry an expected `Host` header and every state-changing request must be same-origin, so a web page elsewhere cannot drive Superdeck through your browser. Browsers that say where a request came from are refused when it came from another site.
 - **Clean environment.** Child processes get an explicit environment. The launcher's own `CLAUDE_*` and `ANTHROPIC_*` variables are not passed on.
 - **No shortcuts around Claude's safeguards.** It never passes `--dangerously-skip-permissions` or a permission-mode override, and never edits Claude's config to pre-trust a folder. It never reads or stores Claude credentials.
-- **A record.** Every state-changing request is written to the log with the address it came from.
+- **A record.** Every state-changing request is written to the log with its address and the network address it came from. It does not record what was typed.
 - **Private files.** Its database, log and sockets are readable only by you.
-- **Limits.** At most 16 instances, 3 sign-ins in progress and 12 accounts.
+- **Limits.** At most 16 instances, 3 sign-ins in progress and 12 accounts, and launches are rate limited.
+- **Asking first.** Stopping, moving, relaunching and removing an account all ask for confirmation, with or without htmx.
 
 Not built: sign-in, TLS.
 
 ## How it is built
 
 Everything is rendered on the server with Go's `html/template`. The only script in the browser is [htmx](https://htmx.org), one vendored file, which refreshes status and filters the folder list. Every screen also works as plain links and forms.
+
+A few things to know about how it behaves. After Superdeck restarts, instances that had already ended are no longer listed. Renaming an account changes the name shown, not its address or the name a running instance registered with Claude; relaunch the instance to pick up the new name.
 
 Each Claude process is kept alive by a **holder**: the same binary, run as `superdeck hold`, detached from Superdeck. A holder owns the process's pseudo-terminal, keeps the last half megabyte of its raw output, and answers on a private Unix socket. It does nothing clever, on purpose, because Claude lives exactly as long as it does. Superdeck polls each holder, replays the output through a terminal emulator to know what is on the screen, and records each process in its database so that after a restart it knows what is being held.
 
@@ -149,15 +152,16 @@ Go dependencies: [creack/pty](https://github.com/creack/pty) for pseudo-terminal
 | Failure | What Superdeck does |
 |---|---|
 | Superdeck crashes, is killed or is upgraded | launchd restarts it. Holders and Claude are not touched; Superdeck finds them again and carries on. |
-| A Claude instance dies on its own | Restarted after 5 seconds, doubling up to 5 minutes, at most 8 times in a row. The home screen shows it as restarting. If the restart itself fails, it keeps trying on the same schedule. |
+| A Claude instance dies on its own | Restarted after 5 seconds, doubling up to every 5 minutes, for as long as it takes. An instance you launched is only ever forgotten by you. The home screen shows it as restarting, and you can tell it not to. |
 | A holder dies | Claude dies with it. Superdeck notices after a few seconds, makes sure nothing was left behind, and restarts the instance. |
-| A holder is slow or frozen | Nothing. Only an exit record, or several checks in a row finding nothing listening, is taken to mean a process has ended. |
-| The Mac reboots | The instances are gone. Superdeck relaunches the ones you had launched. With FileVault on, nothing runs until someone unlocks the Mac in person. |
-| An instance fails within 30 seconds of first starting | Left stopped and marked failed, with the last thing Claude printed. It is forgotten, so it does not come back on the next restart. |
-| An account is signed out | The instance stops, says so, and links to the account. It is not restarted. Right after the Mac starts, a signed-out report is retried three times first, in case the Keychain was not readable yet. |
+| A holder is slow, frozen or cut off from its socket | Nothing is signalled, ever, while the holder process is alive. The instance shows "not responding" and recovers by itself if the holder answers again. You can still stop it. |
+| The Mac reboots | The instances are gone. Superdeck relaunches the ones you had launched, and keeps trying any that cannot start yet (a disk not mounted, no network). With FileVault on, nothing runs until someone unlocks the Mac in person. |
+| An instance that has never once run properly fails | Left stopped and marked failed, with the last thing Claude printed, and forgotten. Once an instance has run for 30 seconds it counts as working and is retried from then on. |
+| An account is signed out | The instance stops, says so, and links to the account. It is not retried, since that would only loop, but it is kept: sign the account in and it starts again. For ten minutes after Superdeck starts, a signed-out report is retried three times first, in case the Keychain was not readable yet. |
 | Claude asks a question | The instance waits and shows "needs you" until you answer. |
 | You decline to trust a folder | The instance stops and is forgotten. |
-| A move cannot be completed | The target is checked before anything is stopped. If the new one still fails to start, the old one is put back. |
+| A move cannot be completed | The target is checked before anything is stopped. If the new one still fails to start, the old one is put back. Two moves at once, or one from a stale tab, act on the instance as it is now and cannot leave two running. |
+| A page is open on an instance that has since been restarted | Its address leads to the current one, and Stop, Move and Relaunch act on the current one. |
 | A sign-in code is wrong or expired | The sign-in is marked failed with a "Try again" button. |
 | A sign-in is abandoned | Cancelled after 15 minutes. Starting another returns you to the one in progress. |
 | A process prints something the terminal emulator cannot handle | That process falls back to plain text. Superdeck keeps running. |

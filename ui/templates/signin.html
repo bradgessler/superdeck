@@ -3,15 +3,15 @@
 {{if .I.Live}}
   <h1>Sign in to {{.I.Account}}</h1>
   {{if .I.URL}}
-  <div class="signin">
-    <p class="lede">Sign in on Anthropic's page, then paste the code it gives you.</p>
+  <p class="lede">Sign in on Anthropic's page, then paste the code it gives you.</p>
+  <div class="actions signin">
     <a class="btn big open" href="{{.I.URL}}" target="_blank" rel="noopener noreferrer">Open Anthropic's sign-in page</a>
-    <form method="post" action="/instances/{{.I.ID}}/code">
+    <form method="post" action="/instances/{{.I.ID}}/code" class="code">
       <label for="code">Code</label>
       <input id="code" name="code" required autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
       <button class="btn big finish">Finish signing in</button>
     </form>
-    <form method="post" action="/instances/{{.I.ID}}/stop" class="cancel"><button>Cancel</button></form>
+    <form method="post" action="/instances/{{.I.ID}}/stop"><button class="btn big">Cancel</button></form>
   </div>
   {{else}}
   <p class="lede">{{if eq .I.Lede "slow"}}Claude has not produced a sign-in link yet. That usually takes a second or two.{{else}}Getting a sign-in link from Claude…{{end}}</p>

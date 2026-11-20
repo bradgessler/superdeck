@@ -1,0 +1,12 @@
+{{template "head" .}}
+<h1>Are you sure?</h1>
+<p class="lede">{{.Question}}</p>
+<div class="actions">
+  <form method="post" action="{{.Action}}">
+    {{range $k, $v := .Fields}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+    <input type="hidden" name="sure" value="yes">
+    <button class="btn big risky">{{.Yes}}</button>
+  </form>
+  <a class="btn big" href="{{.Back}}">Cancel</a>
+</div>
+{{template "foot" .}}

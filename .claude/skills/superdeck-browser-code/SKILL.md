@@ -22,7 +22,9 @@ The owner wants the least possible running in the browser. A previous version wa
 - A screen with buttons or an input stays still. It polls `/instances/{id}/watch?sig=...` with `hx-swap="none"`, sending the signature of what it is showing. The server answers `204` and nothing until the signature no longer matches, then sends `HX-Refresh` or `HX-Redirect`. Never swap a region that holds a control someone may be about to tap.
 - A list of links that changes (the instances list): `hx-get` the fragment with `hx-trigger="every 3s"` and `hx-swap="outerHTML"`.
 - The terminal: `hx-get` the screen into a `<pre>` every second; the server sends `HX-Refresh` once the process has ended so polling stops.
-- Type-to-filter: `hx-get` on the input with `hx-trigger="input changed delay:120ms"`, `hx-include` the checked radio so the selection survives. The filter is its own `GET` form, so it works without htmx and Enter in it can never submit something else. Controls that belong to another form use the `form="..."` attribute.
+- Type-to-filter: `hx-get` on the input with `hx-trigger="input changed delay:120ms"`, `hx-include` the checked radio so the selection survives. **Do not use the `form="..."` attribute to attach controls to a form elsewhere on the page**: a launch screen built that way did not submit in Safari. Use one ordinary form. Where Enter in a text box must not trigger the form's main action, make the form's *first* submit button a hidden one with `formmethod`/`formaction` that does the harmless thing (see `new.html`).
+- Check anything form-related in Safari, not only Chrome.
+- Destructive actions use `hx-confirm` and, for when htmx is not there, `App.sure`, which shows a confirmation page.
 - A form that should work with or without htmx: give it both `action` and `hx-post`. Handlers use `to()` in `web.go`, which sends `HX-Redirect` or a `303`.
 - Confirmation: `hx-confirm` on the form.
 

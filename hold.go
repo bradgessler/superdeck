@@ -365,11 +365,11 @@ func (h *holder) handle(c net.Conn) {
 			}
 			ok := send(backlog)
 			for b := range s.q {
-				if ok {
-					ok = send(b)
+				if ok = ok && send(b); !ok {
+					break // a viewer that cannot be written to is let go at once
 				}
 			}
-			c.Close()
+			c.Close() // this also ends the read below, which unregisters the viewer
 		}()
 		io.Copy(h.tty, c) // what the person types, until they detach
 		h.mu.Lock()

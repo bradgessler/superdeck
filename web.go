@@ -1,11 +1,11 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"html/template"
-	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -17,10 +17,29 @@ import (
 
 var pages = template.Must(template.ParseFS(uiFS, "ui/templates/*.html"))
 
+// assetVersion is a fingerprint of the stylesheet and script. Pages address
+// them with it, so browsers can keep them until they change.
+var assetVersion = func() string {
+	h := sha256.New()
+	for _, f := range []string{"ui/static/app.css", "ui/static/htmx.min.js"} {
+		b, _ := uiFS.ReadFile(f)
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:6])
+}()
+
 func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
-	static, _ := fs.Sub(uiFS, "ui")
-	mux.Handle("GET /static/", http.FileServer(http.FS(static)))
+	// Exactly two files are served, by name. Nothing else in the binary is
+	// reachable, and there is no directory listing.
+	for name, ctype := range map[string]string{"app.css": "text/css; charset=utf-8", "htmx.min.js": "text/javascript; charset=utf-8"} {
+		body, _ := uiFS.ReadFile("ui/static/" + name)
+		mux.HandleFunc("GET /static/"+name, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", ctype)
+			w.Write(body)
+		})
+	}
+	mux.HandleFunc("/", notFound) // anything else gets the page with a way back
 
 	mux.HandleFunc("GET /{$}", a.pageHome)
 	mux.HandleFunc("GET /instances", a.partInstances)
@@ -50,6 +69,10 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /instances/{id}/move", a.pageMove)
 	mux.HandleFunc("POST /instances/{id}/move", a.doMove)
 	mux.HandleFunc("POST /update", a.doUpdate)
+	mux.HandleFunc("GET /refresh", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("HX-Refresh", "true") // used by pages waiting on something that has no state of its own
+		w.WriteHeader(http.StatusNoContent)
+	})
 	return a.guard(mux)
 }
 
@@ -62,13 +85,21 @@ func render(w http.ResponseWriter, name string, data map[string]any) {
 	}
 }
 
-// page builds the data every full page needs.
-func page(r *http.Request, title, nav string) map[string]any {
+// page builds the data every full page needs. A message carried over from a
+// redirect is shown only if this server signed it, so a link someone crafted
+// cannot put words on the page.
+func (a *App) page(r *http.Request, title, nav string) map[string]any {
 	msg := r.URL.Query().Get("error")
-	if len(msg) > 300 {
-		msg = msg[:300]
+	if len(msg) > 300 || !hmac.Equal([]byte(r.URL.Query().Get("sig")), []byte(a.sign(msg))) {
+		msg = ""
 	}
-	return map[string]any{"Title": title, "Nav": nav, "Error": msg}
+	return map[string]any{"Title": title, "Nav": nav, "Error": msg, "V": assetVersion}
+}
+
+func (a *App) sign(msg string) string {
+	m := hmac.New(sha256.New, a.flash)
+	m.Write([]byte(msg))
+	return hex.EncodeToString(m.Sum(nil)[:12])
 }
 
 // to sends the browser to another page, for both plain forms and HTMX.
@@ -82,7 +113,7 @@ func to(w http.ResponseWriter, r *http.Request, target string) {
 }
 
 // fail returns to a page and shows what went wrong there.
-func fail(w http.ResponseWriter, r *http.Request, back string, err error) {
+func (a *App) fail(w http.ResponseWriter, r *http.Request, back string, err error) {
 	msg := err.Error()
 	if msg != "" {
 		msg = strings.ToUpper(msg[:1]) + msg[1:] + "."
@@ -91,7 +122,45 @@ func fail(w http.ResponseWriter, r *http.Request, back string, err error) {
 	if strings.Contains(back, "?") {
 		sep = "&"
 	}
-	to(w, r, back+sep+"error="+url.QueryEscape(msg))
+	to(w, r, back+sep+"error="+url.QueryEscape(msg)+"&sig="+a.sign(msg))
+}
+
+// sure makes a person confirm something that cannot be undone. With HTMX the
+// browser has already asked; without it, this shows a page that asks. It
+// reports whether to go ahead.
+func (a *App) sure(w http.ResponseWriter, r *http.Request, question, yes, back string) bool {
+	if r.Header.Get("HX-Request") != "" || r.FormValue("sure") == "yes" {
+		return true
+	}
+	d := a.page(r, "Are you sure?", "")
+	d["Question"], d["Yes"], d["Back"], d["Action"] = question, yes, back, r.URL.Path
+	fields := map[string]string{}
+	for k, v := range r.PostForm {
+		if len(v) > 0 && k != "sure" {
+			fields[k] = v[0]
+		}
+	}
+	d["Fields"] = fields
+	render(w, "confirm.html", d)
+	return false
+}
+
+// allow limits how fast processes can be started through the page, whoever
+// is asking: a burst, then a few a minute.
+func (a *App) allow() bool {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	now := time.Now()
+	a.tokens += now.Sub(a.rateAt).Seconds() / 6 // one every six seconds
+	a.rateAt = now
+	if a.tokens > 12 {
+		a.tokens = 12
+	}
+	if a.tokens < 1 {
+		return false
+	}
+	a.tokens--
+	return true
 }
 
 func ago(t time.Time) string {
@@ -134,13 +203,26 @@ type accountView struct {
 }
 
 func (a *App) accountViews(selected string) []accountView {
+	// Just after Superdeck starts nothing is known about who is signed in.
+	// A check takes a fraction of a second, so give them a moment rather
+	// than show every account as unknown.
+	for deadline := time.Now().Add(1200 * time.Millisecond); time.Now().Before(deadline); time.Sleep(40 * time.Millisecond) {
+		waiting := false
+		for _, ac := range a.accountList() {
+			c, _ := a.accountStatus(ac.ID)["checking"].(bool)
+			waiting = waiting || c
+		}
+		if !waiting {
+			break
+		}
+	}
 	runs := a.mgr.List()
 	out := []accountView{}
 	for _, ac := range a.accountList() {
 		st := a.accountStatus(ac.ID)
 		v := accountView{ID: ac.ID, Name: ac.Name, Who: "signed out", Selected: ac.ID == selected}
 		if c, _ := st["checking"].(bool); c {
-			v.Who, v.Checking = "checking…", true
+			v.Who, v.Checking = "checking", true
 		}
 		if in, _ := st["loggedIn"].(bool); in {
 			v.SignedIn = true
@@ -208,6 +290,9 @@ func (a *App) instance(v RunView) instanceView {
 		iv.Lede = "Claude is asking a question."
 
 	// ---- running ----
+	case v.Lost:
+		iv.State, iv.Cls = "not responding", "wait"
+		iv.Lede = "Superdeck cannot reach this instance at the moment. It has been left alone and may well still be running; this clears by itself if it answers again."
 	case !v.Done && iv.IsLogin:
 		iv.State, iv.Cls = "waiting for you", "wait"
 		if v.URL == "" && time.Since(v.Started) > 15*time.Second {
@@ -230,6 +315,9 @@ func (a *App) instance(v RunView) instanceView {
 	case v.Next != "":
 		iv.State, iv.Do = "replaced", "next"
 		iv.Lede = "This one ended and was started again."
+	case !v.RestartAt.IsZero() && v.Hint == "needs-login":
+		iv.State, iv.Cls, iv.Restarting = "restarting", "wait", true
+		iv.Lede = "Claude said " + name + " is signed out. Just after Superdeck starts that can be wrong, so it is trying again."
 	case !v.RestartAt.IsZero():
 		iv.State, iv.Cls, iv.Restarting = "restarting", "wait", true
 		iv.Lede = "It stopped unexpectedly. Superdeck is starting it again."
@@ -240,7 +328,11 @@ func (a *App) instance(v RunView) instanceView {
 		iv.Lede = "Claude did not start because this folder has not been trusted."
 	case v.Hint == "needs-login":
 		iv.State, iv.Cls, iv.Do = "signed out", "wait", "signin"
-		iv.Lede = name + " is signed out, so Claude could not start. Sign it in, then launch again."
+		iv.Lede = name + " is signed out, so Claude could not start. Sign it in and this instance will start again."
+		if in, _ := a.accountStatus(v.Account)["loggedIn"].(bool); in {
+			iv.Do = "again"
+			iv.Lede = name + " was signed out when this started. It is signed in now."
+		}
 	case iv.IsLogin && v.Stopped:
 		iv.State = "cancelled"
 	case iv.IsLogin && v.ExitCode == 0:
@@ -289,7 +381,7 @@ func (a *App) instance(v RunView) instanceView {
 	// Everything that changes what the screen shows or offers. The relative
 	// time is left out on purpose: the screen is not redrawn just for that.
 	sum := sha256.Sum256([]byte(strings.Join([]string{iv.State, iv.Do, iv.Lede, iv.Detail, iv.Question,
-		iv.URL, iv.Link, iv.Next, fmt.Sprint(iv.Outdated, iv.Live, v.Restarts)}, "\x00")))
+		iv.URL, iv.Link, iv.Next, fmt.Sprint(iv.Outdated, iv.Live, v.Restarts, v.Lost)}, "\x00")))
 	iv.Sig = hex.EncodeToString(sum[:8])
 	return iv
 }
@@ -378,7 +470,7 @@ func (a *App) instanceLists() (live, past []instanceView) {
 }
 
 func (a *App) pageHome(w http.ResponseWriter, r *http.Request) {
-	d := page(r, "Instances", "instances")
+	d := a.page(r, "Instances", "instances")
 	d["Live"], d["Past"] = a.instanceLists()
 	d["Claude"] = a.claudeVersion()
 	for _, v := range a.mgr.List() {
@@ -396,12 +488,16 @@ func (a *App) partInstances(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) pageNew(w http.ResponseWriter, r *http.Request) {
-	d := page(r, "New instance", "instances")
+	d := a.page(r, "New instance", "instances")
 	selected := r.URL.Query().Get("folder")
 	if selected == "" {
 		selected = cookie(r, "sd_folder")
 	}
-	views := a.accountViews(cookie(r, "sd_account"))
+	chosen := r.URL.Query().Get("account") // kept when the filter is submitted as a plain form
+	if chosen == "" {
+		chosen = cookie(r, "sd_account")
+	}
+	views := a.accountViews(chosen)
 	// Only a signed-in account can be chosen. Pick the remembered one if it
 	// still is, otherwise the first that is.
 	picked, usable := false, false
@@ -417,6 +513,11 @@ func (a *App) pageNew(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query().Get("q") // so the filter also works as a plain form
 	d["Accounts"], d["Usable"], d["Q"] = views, usable, q
+	for _, v := range views {
+		if v.Checking {
+			d["Checking"] = true // the page looks again in a moment
+		}
+	}
 	d["Folders"], d["More"], d["Total"] = a.folders(q, selected)
 	d["Root"] = a.rootNames()
 	render(w, "new.html", d)
@@ -430,35 +531,44 @@ func (a *App) partFolders(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) doLaunch(w http.ResponseWriter, r *http.Request) {
 	acct, folder := r.FormValue("account"), r.FormValue("folder")
+	back := "/new?folder=" + url.QueryEscape(folder)
 	if acct == "" {
-		fail(w, r, "/new", fmt.Errorf("pick an account"))
+		a.fail(w, r, back, fmt.Errorf("pick an account"))
 		return
 	}
 	if folder == "" {
-		fail(w, r, "/new", fmt.Errorf("pick a folder"))
+		a.fail(w, r, back, fmt.Errorf("pick a folder"))
 		return
 	}
 	if _, err := a.accountDir(acct); err != nil {
-		fail(w, r, "/new", err)
+		a.fail(w, r, back, err)
 		return
 	}
 	if in, _ := a.accountStatusNow(acct)["loggedIn"].(bool); !in {
-		fail(w, r, "/accounts/"+url.PathEscape(acct), fmt.Errorf("sign in to %s first", a.accountName(acct)))
+		a.fail(w, r, "/accounts/"+url.PathEscape(acct), fmt.Errorf("sign in to %s first", a.accountName(acct)))
 		return
 	}
+	if !a.allow() {
+		a.fail(w, r, back, fmt.Errorf("too many launches in a short time; wait a moment"))
+		return
+	}
+	unlock := a.folderLock(folder)
 	run, err := a.startServer(acct, folder, "", 0, 0)
+	if err == nil {
+		a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
+	}
+	unlock()
 	if err != nil {
-		fail(w, r, "/new", err)
+		a.fail(w, r, back, err)
 		return
 	}
-	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	remember(w, "sd_account", acct)
 	remember(w, "sd_folder", folder)
 	to(w, r, "/instances/"+run.ID)
 }
 
 func (a *App) pageNewFolder(w http.ResponseWriter, r *http.Request) {
-	d := page(r, "New folder", "instances")
+	d := a.page(r, "New folder", "instances")
 	type choice struct{ Path, Name string }
 	var roots []choice
 	for _, root := range a.roots {
@@ -475,12 +585,12 @@ func (a *App) doNewFolder(w http.ResponseWriter, r *http.Request) {
 		allowed = allowed || root == in
 	}
 	if !allowed {
-		fail(w, r, "/folders/new", fmt.Errorf("pick where to create the folder"))
+		a.fail(w, r, "/folders/new", fmt.Errorf("pick where to create the folder"))
 		return
 	}
 	rel, err := createProject(in, strings.TrimSpace(r.FormValue("name")))
 	if err != nil {
-		fail(w, r, "/folders/new", err)
+		a.fail(w, r, "/folders/new", err)
 		return
 	}
 	a.folderMu.Lock()
@@ -504,10 +614,15 @@ func sameLogin(views []accountView) {
 }
 
 func (a *App) pageAccounts(w http.ResponseWriter, r *http.Request) {
-	d := page(r, "Accounts", "accounts")
+	d := a.page(r, "Accounts", "accounts")
 	views := a.accountViews("")
 	sameLogin(views)
 	d["Accounts"] = views
+	for _, v := range views {
+		if v.Checking {
+			d["Checking"] = true
+		}
+	}
 	render(w, "accounts.html", d)
 }
 
@@ -520,11 +635,11 @@ func (a *App) pageAccount(w http.ResponseWriter, r *http.Request) {
 		if v.ID != id {
 			continue
 		}
-		d := page(r, v.Name, "accounts")
-		d["A"] = v
+		d := a.page(r, v.Name, "accounts")
+		d["A"], d["Checking"] = v, v.Checking
 		var running []instanceView
 		for _, rv := range a.mgr.List() {
-			if rv.Kind == "server" && rv.Account == id && !rv.Done {
+			if rv.Kind == "server" && rv.Account == id && rv.Next == "" && (!rv.Done || !rv.RestartAt.IsZero()) {
 				running = append(running, a.instance(rv))
 			}
 		}
@@ -536,18 +651,19 @@ func (a *App) pageAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) pageNewAccount(w http.ResponseWriter, r *http.Request) {
-	render(w, "account-new.html", page(r, "Add account", "accounts"))
+	render(w, "account-new.html", a.page(r, "Add account", "accounts"))
 }
 
 func (a *App) doNewAccount(w http.ResponseWriter, r *http.Request) {
 	id, err := a.addAccount(strings.TrimSpace(r.FormValue("name")))
 	if err != nil {
-		fail(w, r, "/accounts/new", err)
+		a.fail(w, r, "/accounts/new", err)
 		return
 	}
 	run, err := a.startLogin(id)
 	if err != nil {
-		fail(w, r, "/accounts", err)
+		a.removeAccount(id) // do not leave behind an account that never got as far as signing in
+		a.fail(w, r, "/accounts", err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)
@@ -556,7 +672,7 @@ func (a *App) doNewAccount(w http.ResponseWriter, r *http.Request) {
 func (a *App) doRename(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := a.setName(id, strings.TrimSpace(r.FormValue("name"))); err != nil {
-		fail(w, r, "/accounts/"+url.PathEscape(id), err)
+		a.fail(w, r, "/accounts/"+url.PathEscape(id), err)
 		return
 	}
 	to(w, r, "/accounts/"+url.PathEscape(id))
@@ -564,8 +680,15 @@ func (a *App) doRename(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) doRemoveAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if _, err := a.accountDir(id); err != nil {
+		notFound(w, r)
+		return
+	}
+	if !a.sure(w, r, "Remove "+a.accountName(id)+"? It will be signed out on this Mac and its settings deleted.", "Remove account", "/accounts/"+url.PathEscape(id)) {
+		return
+	}
 	if err := a.removeAccount(id); err != nil {
-		fail(w, r, "/accounts/"+url.PathEscape(id), err)
+		a.fail(w, r, "/accounts/"+url.PathEscape(id), err)
 		return
 	}
 	to(w, r, "/accounts")
@@ -581,7 +704,7 @@ func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := a.startLogin(r.PathValue("id"))
 	if err != nil {
-		fail(w, r, "/accounts/"+url.PathEscape(r.PathValue("id")), err)
+		a.fail(w, r, "/accounts/"+url.PathEscape(r.PathValue("id")), err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)
@@ -590,11 +713,15 @@ func (a *App) doSignIn(w http.ResponseWriter, r *http.Request) {
 // ---- One instance ----
 
 // notFound is a proper page, with a way back, for an address that is no
-// longer anything: an instance from before a restart, a removed account.
+// longer anything: an instance from before a restart, a removed account. A
+// page that was polling such an address is told to reload, so it stops.
 func notFound(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("HX-Request") != "" {
+		w.Header().Set("HX-Refresh", "true")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
-	pages.ExecuteTemplate(w, "notfound.html", page(r, "Not found", ""))
+	pages.ExecuteTemplate(w, "notfound.html", map[string]any{"Title": "Not found", "Nav": "", "V": assetVersion})
 }
 
 func (a *App) run(w http.ResponseWriter, r *http.Request) *Run {
@@ -613,7 +740,7 @@ func (a *App) pageOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	iv := a.instance(run.View())
-	d := page(r, iv.Title+" output", "instances")
+	d := a.page(r, iv.Title+" output", "instances")
 	if iv.IsLogin {
 		d["Nav"] = "accounts"
 	}
@@ -626,8 +753,12 @@ func (a *App) pageInstance(w http.ResponseWriter, r *http.Request) {
 	if run == nil {
 		return
 	}
+	if cur := a.current(run); cur != run {
+		to(w, r, "/instances/"+cur.ID)
+		return
+	}
 	iv := a.instance(run.View())
-	d := page(r, iv.Title, "instances")
+	d := a.page(r, iv.Title, "instances")
 	if iv.IsLogin {
 		d["Nav"] = "accounts"
 	}
@@ -679,11 +810,11 @@ func (a *App) doAnswer(w http.ResponseWriter, r *http.Request) {
 	back := "/instances/" + run.ID
 	v := r.FormValue("answer")
 	if v != "yes" && v != "no" {
-		fail(w, r, back, fmt.Errorf("answer yes or no"))
+		a.fail(w, r, back, fmt.Errorf("answer yes or no"))
 		return
 	}
 	if err := answer(run, v == "yes"); err != nil {
-		fail(w, r, back, err)
+		a.fail(w, r, back, err)
 		return
 	}
 	to(w, r, back)
@@ -697,7 +828,7 @@ func (a *App) doKey(w http.ResponseWriter, r *http.Request) {
 	back := "/instances/" + run.ID
 	back += "/output"
 	if err := pressKey(run, r.FormValue("key")); err != nil {
-		fail(w, r, back, err)
+		a.fail(w, r, back, err)
 		return
 	}
 	if r.Header.Get("HX-Request") != "" {
@@ -714,7 +845,7 @@ func (a *App) doCode(w http.ResponseWriter, r *http.Request) {
 	}
 	back := "/instances/" + run.ID
 	if err := submitCode(run, r.FormValue("code")); err != nil {
-		fail(w, r, back, err)
+		a.fail(w, r, back, err)
 		return
 	}
 	// Give Claude a moment to finish the sign-in before showing the result.
@@ -734,16 +865,31 @@ func (a *App) doStop(w http.ResponseWriter, r *http.Request) {
 	if run == nil {
 		return
 	}
-	if run.Kind == "server" {
-		a.remember(wanted{Account: run.Account, Project: run.Project}, false)
+	if run.Kind != "server" {
+		run.Stop()
+		for deadline := time.Now().Add(3 * time.Second); run.alive() && time.Now().Before(deadline); {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if run.Kind == "login" {
+			to(w, r, "/accounts/"+url.PathEscape(run.Account))
+			return
+		}
+		to(w, r, "/")
+		return
 	}
-	run.Stop()
+	// Whatever tab this came from, it means the instance as it is now.
+	unlock := a.folderLock(run.Project)
+	run = a.current(run)
+	title := filepath.Base(run.Project)
+	if run.alive() && !a.sure(w, r, "Stop "+title+"? Any Claude sessions it is hosting will end.", "Stop instance", "/instances/"+run.ID) {
+		unlock()
+		return
+	}
+	a.remember(wanted{Account: run.Account, Project: run.Project}, false)
+	run.Stop() // for one that is waiting to restart, this cancels the restart
+	unlock()
 	for deadline := time.Now().Add(3 * time.Second); run.alive() && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
-	}
-	if run.Kind == "login" {
-		to(w, r, "/accounts/"+url.PathEscape(run.Account))
-		return
 	}
 	to(w, r, "/")
 }
@@ -753,9 +899,16 @@ func (a *App) doRelaunch(w http.ResponseWriter, r *http.Request) {
 	if old == nil {
 		return
 	}
+	if cur := a.current(old); cur.alive() && !a.sure(w, r, "Relaunch "+filepath.Base(cur.Project)+"? Any Claude sessions it is hosting will end.", "Relaunch", "/instances/"+cur.ID) {
+		return
+	}
+	if !a.allow() {
+		a.fail(w, r, "/instances/"+old.ID, fmt.Errorf("too many launches in a short time; wait a moment"))
+		return
+	}
 	run, err := a.relaunch(old)
 	if err != nil {
-		fail(w, r, "/instances/"+old.ID, err)
+		a.fail(w, r, "/instances/"+old.ID, err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)
@@ -771,8 +924,9 @@ func (a *App) pageMove(w http.ResponseWriter, r *http.Request) {
 		notFound(w, r)
 		return
 	}
+	run = a.current(run)
 	iv := a.instance(run.View())
-	d := page(r, "Move "+iv.Title, "instances")
+	d := a.page(r, "Move "+iv.Title, "instances")
 	var others []accountView
 	for _, v := range a.accountViews("") {
 		if v.ID != run.Account {
@@ -788,18 +942,25 @@ func (a *App) doMove(w http.ResponseWriter, r *http.Request) {
 	if old == nil {
 		return
 	}
+	if cur := a.current(old); cur.alive() && !a.sure(w, r, "Move "+filepath.Base(cur.Project)+" to "+a.accountName(r.FormValue("account"))+"? Any Claude sessions it is hosting will end.", "Move it", "/instances/"+cur.ID+"/move") {
+		return
+	}
 	run, err := a.move(old, r.FormValue("account"))
 	if err != nil {
-		fail(w, r, "/instances/"+old.ID+"/move", err)
+		a.fail(w, r, "/instances/"+old.ID+"/move", err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)
 }
 
 func (a *App) doUpdate(w http.ResponseWriter, r *http.Request) {
+	if !a.allow() {
+		a.fail(w, r, "/", fmt.Errorf("too many requests in a short time; wait a moment"))
+		return
+	}
 	run, err := a.startUpdate()
 	if err != nil {
-		fail(w, r, "/", err)
+		a.fail(w, r, "/", err)
 		return
 	}
 	to(w, r, "/instances/"+run.ID)

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,9 +29,9 @@ var (
 
 // Restart tuning; tests shorten these.
 var (
-	minLife     = 30 * time.Second // shorter-lived exits are startup failures, not crashes
+	minLife     = 30 * time.Second // an instance that has lived this long has proved it works
 	restartBase = 5 * time.Second
-	maxRestarts = 8
+	restartCap  = 5 * time.Minute
 
 	loginTimeout = 15 * time.Minute
 	bootRetry    = 30 * time.Second
@@ -116,6 +117,8 @@ func (a *App) setName(id, name string) error {
 
 // addAccount creates a config directory for a new account and returns its id.
 func (a *App) addAccount(name string) (string, error) {
+	a.acctMu.Lock()
+	defer a.acctMu.Unlock()
 	if !accountNameRe.MatchString(name) {
 		return "", errors.New("account names use lowercase letters, digits and dashes")
 	}
@@ -146,21 +149,81 @@ func (a *App) addAccount(name string) (string, error) {
 // so a background update of the CLI is noticed without constant polling.
 func (a *App) claudeVersion() string {
 	a.verMu.Lock()
-	defer a.verMu.Unlock()
-	if a.ver != "" && time.Since(a.verAt) < time.Minute {
-		return a.ver
+	ver, fresh, known := a.ver, time.Since(a.verAt) < time.Minute, !a.verAt.IsZero()
+	if !fresh {
+		a.verAt = time.Now() // one check at a time, successful or not
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, a.claude, "--version")
-	cmd.Env = childEnv("")
-	if out, err := cmd.Output(); err == nil {
-		if f := strings.Fields(string(out)); len(f) > 0 {
-			a.ver = f[0]
+	a.verMu.Unlock()
+	check := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, a.claude, "--version")
+		cmd.Env = childEnv("")
+		v := ""
+		if out, err := cmd.Output(); err == nil {
+			if f := strings.Fields(string(out)); len(f) > 0 {
+				v = f[0]
+			}
 		}
+		a.verMu.Lock()
+		if v != "" {
+			a.ver = v
+		}
+		a.verMu.Unlock()
 	}
-	a.verAt = time.Now()
-	return a.ver
+	switch {
+	case fresh:
+	case known:
+		go check() // show what is known; refresh behind the scenes
+	default:
+		check() // the very first time, wait for it
+		a.verMu.Lock()
+		ver = a.ver
+		a.verMu.Unlock()
+	}
+	return ver
+}
+
+// backoff is how long to wait before restart attempt n: doubling from
+// restartBase, never more than restartCap.
+func backoff(n int) time.Duration {
+	d := restartBase
+	for i := 1; i < n && d < restartCap; i++ {
+		d *= 2
+	}
+	if d > restartCap {
+		d = restartCap
+	}
+	return d
+}
+
+// folderLock serialises everything that starts or stops instances in one
+// folder, so that a double tap, a stale tab and a restart coming due cannot
+// between them leave two running.
+func (a *App) folderLock(folder string) func() {
+	a.opMu.Lock()
+	m := a.ops[folder]
+	if m == nil {
+		m = &sync.Mutex{}
+		a.ops[folder] = m
+	}
+	a.opMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// current follows a run to whatever replaced it. Pages and tabs can be
+// holding the address of a run that has since been restarted; what the
+// person means is the instance, not that one process.
+func (a *App) current(r *Run) *Run {
+	for i := 0; i < 50; i++ {
+		next := a.mgr.Get(r.View().Next)
+		if next == nil {
+			return r
+		}
+		r = next
+	}
+	return r
 }
 
 // startServer launches `claude remote-control` for one account in one folder.
@@ -208,57 +271,61 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	if err := a.mgr.Start(run, argv, childEnv(cfg), a.exitHook(run)); err != nil {
 		return nil, err
 	}
+	// Once it has lived a while it has proved it works, and from then on it
+	// is retried however often it fails.
+	time.AfterFunc(minLife, func() {
+		if run.alive() {
+			a.data().SetProven(run.Account, run.Project)
+		}
+	})
 	return run, nil
 }
 
-// serverExited decides what happens when an instance exits: restart it, or
-// leave it stopped.
+// serverExited decides what happens when an instance exits.
 //
-// It is restarted, with a growing delay, when it died on its own after
-// running a while, and also when a restart attempt itself fails quickly:
-// after a long network outage the first attempts are expected to fail, and
-// giving up at the first one would end supervision for good.
+// An instance a person launched stays theirs until they stop it. If it dies
+// it is restarted, with a delay that doubles up to a few minutes, for as long
+// as it takes: after a long network outage or a reboot the first attempts are
+// expected to fail, and giving up would silently end supervision.
 //
-// It is left stopped when a person stopped it, when it never got going in the
-// first place, and when it is waiting on something only a person can fix (a
-// sign-in, a trust decision). Those are forgotten, so that restarting
-// Superdeck does not keep bringing them back.
+// The exceptions are things only a person can fix. A signed-out account is
+// not retried (it would only loop) but is kept, and comes back when the
+// account is signed in. A folder they declined to trust is forgotten. And an
+// instance that has never once run properly is dropped after its first
+// failure rather than retried for ever.
 func (a *App) serverExited(r *Run) {
-	if a.closing.Load() || r.wasStopped() {
+	if a.closing.Load() || r.wasStopped() || !a.isWanted(r.Account, r.Project) {
 		return
 	}
 	v := r.View()
-	// Right after the Mac starts, the Keychain may not be readable yet and
-	// Claude reports the account as signed out. Try again a few times before
-	// believing it.
-	if v.Hint == "needs-login" && time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
-		log.Printf("%s reported signed out soon after startup; retrying in %s (attempt %d)", r.Name, bootRetry, r.Restarts+1)
-		a.scheduleRestart(r, r.Restarts+1, bootRetry)
+	w := wanted{Account: r.Account, Project: r.Project}
+	switch v.Hint {
+	case "needs-login":
+		// Right after Superdeck starts, the Keychain may not be readable
+		// yet. Try a few times before believing it.
+		if time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
+			log.Printf("%s reported signed out soon after startup; retrying in %s (attempt %d)", r.Name, bootRetry, r.Restarts+1)
+			a.scheduleRestart(r, r.Restarts+1, bootRetry)
+			return
+		}
+		go a.refreshStatus(r.Account) // the account screen should say so too
+		return
+	case "needs-trust":
+		a.remember(w, false)
 		return
 	}
-	if v.Hint == "needs-login" {
-		go a.refreshStatus(r.Account) // the account screen should say so too
-	}
 	life := time.Since(r.Started)
-	if v.Hint != "" || (life < minLife && r.Restarts == 0) {
-		a.remember(wanted{Account: r.Account, Project: r.Project}, false)
+	if life < minLife && !a.data().Proven(r.Account, r.Project) {
+		log.Printf("%s failed on its first start; not retrying", r.Name)
+		a.remember(w, false)
 		return
 	}
 	n := r.Restarts + 1
 	if life > 10*time.Minute {
 		n = 1
 	}
-	if n > maxRestarts {
-		log.Printf("%s: giving up after %d restarts in a row", r.Name, maxRestarts)
-		a.remember(wanted{Account: r.Account, Project: r.Project}, false)
-		return
-	}
-	delay := restartBase << (n - 1)
-	if delay > 5*time.Minute {
-		delay = 5 * time.Minute
-	}
-	log.Printf("%s exited on its own after %s; restarting in %s (attempt %d)", r.Name, life.Round(time.Second), delay, n)
-	a.scheduleRestart(r, n, delay)
+	log.Printf("%s exited on its own after %s; restarting in %s (attempt %d)", r.Name, life.Round(time.Second), backoff(n), n)
+	a.scheduleRestart(r, n, backoff(n))
 }
 
 func (a *App) scheduleRestart(r *Run, n int, delay time.Duration) {
@@ -273,8 +340,11 @@ func (a *App) restart(r *Run, n int) {
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("%s: restart panicked: %v", r.Name, p)
+			r.setRestart(time.Time{})
 		}
 	}()
+	unlock := a.folderLock(r.Project)
+	defer unlock()
 	if a.closing.Load() || r.wasStopped() || !a.isWanted(r.Account, r.Project) || a.running(r.Account, r.Project) {
 		r.setRestart(time.Time{})
 		return
@@ -283,27 +353,44 @@ func (a *App) restart(r *Run, n int) {
 	if err != nil {
 		// Could not even start it (the limit was reached, a disk is not
 		// mounted). Keep trying, more slowly, rather than dropping it.
-		if n >= maxRestarts {
-			log.Printf("%s: restart failed and no attempts are left: %v", r.Name, err)
-			r.setRestart(time.Time{})
-			a.remember(wanted{Account: r.Account, Project: r.Project}, false)
-			return
-		}
-		delay := restartBase << n
-		if delay > 5*time.Minute {
-			delay = 5 * time.Minute
-		}
-		log.Printf("%s: restart failed (%v); trying again in %s", r.Name, err, delay)
-		a.scheduleRestart(r, n+1, delay)
+		log.Printf("%s: restart failed (%v); trying again in %s", r.Name, err, backoff(n+1))
+		a.scheduleRestart(r, n+1, backoff(n+1))
 		return
 	}
 	r.setNext(next.ID)
 }
 
+// bringBack starts a remembered instance that is not running, and keeps
+// trying if it cannot be started yet: a folder on a disk that is not mounted,
+// say. Used when Superdeck starts and when an account is signed in.
+func (a *App) bringBack(w wanted, n int) {
+	defer func() { recover() }()
+	if a.closing.Load() || !a.isWanted(w.Account, w.Project) {
+		return
+	}
+	unlock := a.folderLock(w.Project)
+	if a.running(w.Account, w.Project) {
+		unlock()
+		return
+	}
+	_, err := a.startServer(w.Account, w.Project, w.Spawn, w.Capacity, 0)
+	unlock()
+	if err != nil {
+		log.Printf("could not bring back %s as %s (%v); trying again in %s", w.Project, a.accountName(w.Account), err, backoff(n))
+		time.AfterFunc(backoff(n), func() { a.bringBack(w, n+1) })
+	}
+}
+
 // isWanted reports whether a person launched this instance and has not
 // stopped it since.
 func (a *App) isWanted(accountID, folder string) bool {
-	for _, w := range a.loadWanted() {
+	list, err := a.data().Wanted()
+	if err != nil {
+		// Not being able to read the list is no reason to stop looking
+		// after an instance.
+		return true
+	}
+	for _, w := range list {
 		if w.Account == accountID && w.Project == folder {
 			return true
 		}
@@ -343,12 +430,15 @@ func (a *App) canStart(accountID, folder string, replacing *Run) error {
 	return nil
 }
 
-// stopAndWait stops a run and waits for it to be gone.
-func stopAndWait(r *Run) error {
+// stopAndWait stops a run and waits for it to be gone. If it will not go in
+// time the stop is taken back, so the run is still looked after.
+func (a *App) stopAndWait(r *Run) error {
 	r.Stop()
 	for deadline := time.Now().Add(8 * time.Second); r.alive(); time.Sleep(50 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			return errors.New("the instance did not stop in time; try again")
+			r.unstop()
+			a.data().ClearStopped(r.ID)
+			return errors.New("the instance did not stop in time, so nothing was changed; try again")
 		}
 	}
 	return nil
@@ -361,18 +451,25 @@ func (a *App) relaunch(old *Run) (*Run, error) {
 	if old.Kind != "server" {
 		return nil, errors.New("only instances can be relaunched")
 	}
+	unlock := a.folderLock(old.Project)
+	defer unlock()
+	old = a.current(old)
 	// Check it can come back before taking it down.
 	if err := a.canStart(old.Account, old.Project, old); err != nil {
 		return nil, err
 	}
-	if err := stopAndWait(old); err != nil {
+	if err := a.stopAndWait(old); err != nil {
 		return nil, err
 	}
+	a.remember(wanted{old.Account, old.Project, old.spawn, old.capacity}, true)
 	run, err := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
 	if err != nil {
-		return nil, err
+		// It is down and its replacement did not start. Do not leave it at
+		// that: have it retried like any instance that died.
+		old.unstop()
+		a.scheduleRestart(old, 1, restartBase)
+		return nil, fmt.Errorf("it could not be started again just now (%w); Superdeck will keep trying", err)
 	}
-	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	old.setNext(run.ID)
 	return run, nil
 }
@@ -384,15 +481,19 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 	if old.Kind != "server" {
 		return nil, errors.New("only instances can be moved")
 	}
+	unlock := a.folderLock(old.Project)
+	defer unlock()
+	// Whatever tab this came from, act on the instance as it is now.
+	old = a.current(old)
 	if to == old.Account {
-		return nil, errors.New("it is already running under that account")
+		return nil, errors.New("it is already under that account")
 	}
 	// Everything that could stop the new one from starting is checked first,
 	// so a failed move leaves the old one running.
 	if err := a.canStart(to, old.Project, old); err != nil {
 		return nil, err
 	}
-	if err := stopAndWait(old); err != nil {
+	if err := a.stopAndWait(old); err != nil {
 		return nil, err
 	}
 	a.remember(wanted{Account: old.Account, Project: old.Project}, false)
@@ -400,11 +501,15 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 	if err != nil {
 		// It checked out a moment ago and still failed. Put the old one back
 		// rather than leave nothing running.
-		if back, berr := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0); berr == nil {
-			a.remember(wanted{back.Account, back.Project, back.spawn, back.capacity}, true)
-			old.setNext(back.ID)
+		a.remember(wanted{old.Account, old.Project, old.spawn, old.capacity}, true)
+		back, berr := a.startServer(old.Account, old.Project, old.spawn, old.capacity, 0)
+		if berr != nil {
+			old.unstop()
+			a.scheduleRestart(old, 1, restartBase)
+			return nil, fmt.Errorf("could not start it under %s (%w); Superdeck is bringing it back under %s", a.accountName(to), err, a.accountName(old.Account))
 		}
-		return nil, fmt.Errorf("could not start it under %s, so it was put back under %s: %w", a.accountName(to), a.accountName(old.Account), err)
+		old.setNext(back.ID)
+		return nil, fmt.Errorf("could not start it under %s (%w), so it is running under %s again", a.accountName(to), err, a.accountName(old.Account))
 	}
 	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
 	old.setNext(run.ID)
@@ -486,7 +591,17 @@ func (a *App) exitHook(r *Run) func(*Run) {
 		return a.serverExited
 	case "login":
 		account := r.Account
-		return func(*Run) { a.refreshStatus(account) }
+		return func(done *Run) {
+			a.refreshStatus(account)
+			// Signing in is what its waiting instances were waiting for.
+			if in, _ := a.accountStatusNow(account)["loggedIn"].(bool); in {
+				for _, w := range a.loadWanted() {
+					if w.Account == account {
+						go a.bringBack(w, 1)
+					}
+				}
+			}
+		}
 	case "update":
 		return func(*Run) {
 			a.verMu.Lock()
@@ -512,14 +627,12 @@ func (a *App) expire(run *Run) {
 
 // adopt picks up the processes that were running when Superdeck last exited.
 // The ones still being held carry on untouched; the ones that are gone are
-// recorded as ended. It reports whether it could read the record at all:
-// without it, nothing may be launched, or every held instance would get a
-// duplicate.
-func (a *App) adopt() bool {
+// recorded as ended. If it cannot read the record it says so, and nothing
+// may be launched: every held instance would get a duplicate.
+func (a *App) adopt() error {
 	runs, err := a.data().LiveRuns()
 	if err != nil {
-		log.Printf("reading running processes: %v", err)
-		return false
+		return fmt.Errorf("reading running processes: %w", err)
 	}
 	known := map[string]bool{}
 	for _, r := range runs {
@@ -536,20 +649,20 @@ func (a *App) adopt() bool {
 			a.mgr.Forget(r.ID)
 		}
 	}
-	// A holder with no record cannot be supervised or shown. Stop it rather
-	// than let it run unseen beside whatever gets launched in its place.
-	for _, id := range a.mgr.Sockets() {
+	// A holder with no record cannot be supervised or shown. Ask it to stop
+	// rather than let it run unseen beside whatever is launched in its place.
+	// Its socket is only removed once nothing is holding it.
+	for _, id := range a.mgr.Leftovers() {
 		if known[id] {
 			continue
 		}
-		if err := holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop"); err == nil {
+		if holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop") == nil {
 			log.Printf("stopped a process Superdeck had no record of (%s)", id)
-		} else {
-			a.mgr.Forget(id)
 		}
+		a.mgr.Forget(id)
 	}
 	a.data().Prune()
-	return true
+	return nil
 }
 
 // removeAccount signs an account out with Anthropic's own command, then
@@ -560,8 +673,10 @@ func (a *App) removeAccount(id string) error {
 	if err != nil {
 		return err
 	}
+	a.acctMu.Lock()
+	defer a.acctMu.Unlock()
 	for _, v := range a.mgr.List() {
-		if v.Account == id && !v.Done {
+		if v.Account == id && (!v.Done || !v.RestartAt.IsZero()) {
 			return errors.New("stop what is running under this account first")
 		}
 	}

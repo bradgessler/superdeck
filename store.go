@@ -79,7 +79,14 @@ func migrate(db *sql.DB, path string, existed bool) error {
 		// worth keeping.
 		backup := fmt.Sprintf("%s.schema-%d.bak", path, current)
 		if _, err := os.Stat(backup); err != nil {
-			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
+			// Written under another name first: a copy cut short by a crash
+			// must never be mistaken for a good backup.
+			part := backup + ".part"
+			os.Remove(part)
+			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", part); err != nil {
+				return fmt.Errorf("could not back up the data before upgrading it: %w", err)
+			}
+			if err := os.Rename(part, backup); err != nil {
 				return fmt.Errorf("could not back up the data before upgrading it: %w", err)
 			}
 			log.Printf("backed up data to %s before upgrading", backup)
@@ -187,7 +194,7 @@ func (s *Store) EndRun(id string, code int) error {
 
 // LiveRuns returns the processes that had not exited when Superdeck last knew.
 func (s *Store) LiveRuns() ([]*Run, error) {
-	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped
+	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped, hpid
 		FROM runs WHERE ended_at IS NULL ORDER BY started_at`)
 	if err != nil {
 		return nil, err
@@ -197,7 +204,7 @@ func (s *Store) LiveRuns() ([]*Run, error) {
 	for rows.Next() {
 		r := &Run{}
 		var started string
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Account, &r.Project, &r.dir, &r.Name, &r.spawn, &r.capacity, &r.Version, &r.Restarts, &started, &r.stopped); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Account, &r.Project, &r.dir, &r.Name, &r.spawn, &r.capacity, &r.Version, &r.Restarts, &started, &r.stopped, &r.hpid); err != nil {
 			return nil, err
 		}
 		r.Started, _ = time.Parse(time.RFC3339, started)
@@ -218,4 +225,29 @@ func (s *Store) RemoveAccount(id string) error {
 	}
 	_, err := s.db.Exec(`DELETE FROM accounts WHERE id = ?`, id)
 	return err
+}
+
+// SetHolder records the process id of the holder keeping a run alive.
+func (s *Store) SetHolder(id string, hpid int) error {
+	_, err := s.db.Exec(`UPDATE runs SET hpid = ? WHERE id = ?`, hpid, id)
+	return err
+}
+
+// ClearStopped takes back a stop that did not happen.
+func (s *Store) ClearStopped(id string) error {
+	_, err := s.db.Exec(`UPDATE runs SET stopped = 0 WHERE id = ?`, id)
+	return err
+}
+
+// SetProven records that an instance has run properly at least once.
+func (s *Store) SetProven(accountID, folder string) error {
+	_, err := s.db.Exec(`UPDATE instances SET proven = 1 WHERE account_id = ? AND folder = ?`, accountID, folder)
+	return err
+}
+
+// Proven reports whether an instance has ever run properly.
+func (s *Store) Proven(accountID, folder string) bool {
+	var p bool
+	s.db.QueryRow(`SELECT proven FROM instances WHERE account_id = ? AND folder = ?`, accountID, folder).Scan(&p)
+	return p
 }

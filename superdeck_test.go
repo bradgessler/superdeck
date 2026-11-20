@@ -326,20 +326,44 @@ func TestSignedOutInstanceIsNotRestarted(t *testing.T) {
 	}
 }
 
-func TestRestartGivesUpEventually(t *testing.T) {
-	minLife, restartBase = 0, time.Millisecond
+func TestInstanceThatNeverWorkedIsDroppedButAProvenOneIsRetriedForGood(t *testing.T) {
+	minLife, restartBase = time.Hour, time.Millisecond // nothing here lives long enough to prove itself
+	t.Cleanup(func() { minLife = 0 })
 	a := testApp(t)
 	a.claude = "/usr/bin/true" // every launch exits at once
-	a.ver = "1"
-	a.verAt = time.Now()
+	a.ver, a.verAt = "1", time.Now()
+
+	// Never having worked, it is tried once and dropped.
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return len(servers(a)) == maxRestarts+1 })
-	time.Sleep(400 * time.Millisecond)
-	if n := len(servers(a)); n != maxRestarts+1 {
-		t.Errorf("%d launches, want it to stop at %d", n, maxRestarts+1)
+	waitFor(t, func() bool { return !a.isWanted("work", in(a, "app")) })
+	time.Sleep(100 * time.Millisecond)
+	if n := len(servers(a)); n != 1 {
+		t.Fatalf("an instance that never worked was retried: %d launches", n)
+	}
+
+	// One that has worked before is retried however often it fails, and is
+	// never forgotten: after a long outage every attempt can fail for a while.
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	a.data().SetProven("work", in(a, "app"))
+	if _, err := a.startServer("work", in(a, "app"), "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(servers(a)) >= 12 })
+	if !a.isWanted("work", in(a, "app")) {
+		t.Error("a proven instance was forgotten after repeated failures")
+	}
+}
+
+func TestBackoffDoublesAndIsCapped(t *testing.T) {
+	restartBase = 5 * time.Second
+	t.Cleanup(func() { restartBase = 10 * time.Millisecond })
+	for n, want := range map[int]time.Duration{1: 5 * time.Second, 2: 10 * time.Second, 4: 40 * time.Second, 7: 5 * time.Minute, 60: 5 * time.Minute, 5000: 5 * time.Minute} {
+		if got := backoff(n); got != want {
+			t.Errorf("backoff(%d) = %s, want %s", n, got, want)
+		}
 	}
 }
 
@@ -614,7 +638,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 		t.Errorf("duplicate launch: %q, %d instances", w.Header().Get("Location"), len(servers(a)))
 	}
 
-	do(a, "POST", loc+"/stop", url.Values{}, same)
+	do(a, "POST", loc+"/stop", url.Values{"sure": {"yes"}}, same)
 	if run.alive() {
 		t.Error("instance still alive after stop")
 	}
@@ -814,12 +838,12 @@ func TestMoveInstanceToAnotherAccount(t *testing.T) {
 	}
 	// A signed-out account and the current account are both refused.
 	for _, bad := range []string{"idle", "work", "nope", ""} {
-		w := do(a, "POST", loc+"/move", url.Values{"account": {bad}}, same)
+		w := do(a, "POST", loc+"/move", url.Values{"account": {bad}, "sure": {"yes"}}, same)
 		if !strings.Contains(w.Header().Get("Location"), "error=") || !old.alive() {
 			t.Fatalf("move to %q: %q alive=%v", bad, w.Header().Get("Location"), old.alive())
 		}
 	}
-	w = do(a, "POST", loc+"/move", url.Values{"account": {"spare"}}, same)
+	w = do(a, "POST", loc+"/move", url.Values{"account": {"spare"}, "sure": {"yes"}}, same)
 	moved := a.mgr.Get(strings.TrimPrefix(w.Header().Get("Location"), "/instances/"))
 	if moved == nil || moved.Account != "spare" || moved.Project != in(a, "app") || old.alive() {
 		t.Fatalf("move: %q old alive=%v", w.Header().Get("Location"), old.alive())
@@ -1122,16 +1146,48 @@ func TestFailedMoveLeavesTheOldInstanceRunning(t *testing.T) {
 	}
 }
 
-func TestInstanceThatNeedsAPersonIsNotBroughtBackOnRestart(t *testing.T) {
+func TestSignedOutInstanceWaitsAndComesBackWhenTheAccountIsSignedIn(t *testing.T) {
 	a := testApp(t)
-	a.remember(wanted{"idle", in(a, "app"), "worktree", 4}, true)
 	a.started = time.Now().Add(-time.Hour) // not "soon after startup"
+	a.remember(wanted{"idle", in(a, "app"), "worktree", 4}, true)
+	a.data().SetProven("idle", in(a, "app"))
 	r, err := a.startServer("idle", in(a, "app"), "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return !r.alive() })
-	waitFor(t, func() bool { return !a.isWanted("idle", in(a, "app")) })
+	time.Sleep(150 * time.Millisecond)
+	if n := len(servers(a)); n != 1 || !a.isWanted("idle", in(a, "app")) {
+		t.Fatalf("signed-out instance: %d launches, wanted=%v; want one launch, still wanted", n, a.isWanted("idle", in(a, "app")))
+	}
+	// Signing the account in brings it back without anyone relaunching it.
+	login, err := a.startLogin("idle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return login.View().URL != "" })
+	submitCode(login, "good-code")
+	waitFor(t, func() bool {
+		for _, v := range servers(a) {
+			if !v.Done && strings.Contains(v.Tail(), "serving") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestDecliningTrustForgetsTheInstance(t *testing.T) {
+	a := testApp(t)
+	os.WriteFile(filepath.Join(a.state, "accounts", "work", "asks-trust"), nil, 0o600)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.View().Hint == "needs-trust" })
+	answer(run, false)
+	waitFor(t, func() bool { return !run.alive() && !a.isWanted("work", in(a, "app")) })
 }
 
 func TestSecondSuperdeckOnTheSameDataIsHeldOff(t *testing.T) {
@@ -1165,8 +1221,8 @@ func TestLeftoverFilesAreSweptAndUnknownHoldersStopped(t *testing.T) {
 	os.WriteFile(filepath.Join(a.mgr.dir, "deadbeef0000.sock"), nil, 0o600)
 
 	next := newApp(a.roots, a.state, a.claude)
-	if !next.adopt() {
-		t.Fatal("adopt failed")
+	if err := next.adopt(); err != nil {
+		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return !processAlive(stray.Pid()) })
 	if _, err := os.Stat(filepath.Join(a.mgr.dir, "deadbeef0000.exit")); err == nil {
@@ -1226,13 +1282,13 @@ func TestAccountsAreCappedAndCanBeRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := do(a, "POST", "/accounts/work/remove", url.Values{}, same); !strings.Contains(w.Header().Get("Location"), "error=") {
+	if w := do(a, "POST", "/accounts/work/remove", url.Values{"sure": {"yes"}}, same); !strings.Contains(w.Header().Get("Location"), "error=") {
 		t.Error("removed an account with an instance running under it")
 	}
 	run.Stop()
 	waitFor(t, func() bool { return !run.alive() })
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
-	if w := do(a, "POST", "/accounts/work/remove", url.Values{}, same); w.Header().Get("Location") != "/accounts" {
+	if w := do(a, "POST", "/accounts/work/remove", url.Values{"sure": {"yes"}}, same); w.Header().Get("Location") != "/accounts" {
 		t.Fatalf("remove: %q", w.Header().Get("Location"))
 	}
 	if _, err := os.Stat(filepath.Join(a.state, "accounts", "work")); err == nil {
@@ -1337,8 +1393,7 @@ func TestInstanceScreenSaysWhatIsHappeningAndOffersOneMainAction(t *testing.T) {
 		t.Error("home says nothing is running while a restart is pending")
 	}
 	waitFor(t, func() bool { return run.View().Next != "" })
-	page = do(a, "GET", "/instances/"+run.ID, nil, "").Body.String()
-	if !strings.Contains(page, "/instances/"+run.View().Next) || !strings.Contains(page, "Go to the running instance") {
+	if w := do(a, "GET", "/instances/"+run.ID, nil, ""); w.Header().Get("Location") != "/instances/"+run.View().Next {
 		t.Error("the replaced instance does not lead to its replacement")
 	}
 	home := do(a, "GET", "/", nil, "").Body.String()
@@ -1358,20 +1413,6 @@ func TestSignedOutFailureLeadsToTheAccount(t *testing.T) {
 	page := do(a, "GET", "/instances/"+r.ID, nil, "").Body.String()
 	if !strings.Contains(page, `href="/accounts/idle"`) || !strings.Contains(page, "Sign in to idle") {
 		t.Errorf("no way from the failure to the account: %s", page)
-	}
-}
-
-func TestFilterBoxCannotLaunch(t *testing.T) {
-	a := testApp(t)
-	page := do(a, "GET", "/new?q=ap", nil, "").Body.String()
-	// The filter is its own form; the launch form holds no text input.
-	launch := page[strings.Index(page, `<form id="launch"`):]
-	launch = launch[:strings.Index(launch, "</form>")]
-	if strings.Contains(launch, "<input") {
-		t.Error("the launch form contains an input; Enter in it would launch")
-	}
-	if !strings.Contains(page, `value="ap"`) || !strings.Contains(page, ">app<") {
-		t.Error("the filter does not work as a plain form")
 	}
 }
 
@@ -1396,7 +1437,7 @@ func TestUnknownAddressesGetAPageWithAWayBack(t *testing.T) {
 	}
 }
 
-func TestHolderWhoseSocketIsDeletedShutsDownInOrderAndIsReplaced(t *testing.T) {
+func TestHolderWhoseSocketIsDeletedIsLeftRunningAndCanStillBeStopped(t *testing.T) {
 	minLife, restartBase = 0, 10*time.Millisecond
 	a := testApp(t)
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
@@ -1409,18 +1450,19 @@ func TestHolderWhoseSocketIsDeletedShutsDownInOrderAndIsReplaced(t *testing.T) {
 	// Its socket disappears, as a temporary-files cleaner might do. The
 	// holder and Claude are both still alive but can no longer be reached.
 	os.Remove(first.sock())
-	waitFor(t, func() bool { return !first.alive() })
-	waitFor(t, func() bool { return !processAlive(hpid) && !processAlive(pid) })
-	// It was not left running unseen, and a reachable one took its place.
-	waitFor(t, func() bool {
-		live := 0
-		for _, v := range servers(a) {
-			if !v.Done {
-				live++
-			}
-		}
-		return live == 1
-	})
+	waitFor(t, func() bool { return first.View().Lost })
+	// Claude is working fine. It must not be killed, and no second copy may
+	// be started beside it.
+	time.Sleep(500 * time.Millisecond)
+	if !first.alive() || !processAlive(pid) || !processAlive(hpid) {
+		t.Fatal("a process that was only unreachable was ended")
+	}
+	if n := len(servers(a)); n != 1 {
+		t.Fatalf("%d instances: a duplicate was started beside an unreachable one", n)
+	}
+	// A person can still stop it: the holder is told directly.
+	first.Stop()
+	waitFor(t, func() bool { return !processAlive(pid) && !first.alive() })
 }
 
 func TestManyRestartsOfSuperdeckLeaveProcessesAlone(t *testing.T) {
@@ -1436,8 +1478,8 @@ func TestManyRestartsOfSuperdeckLeaveProcessesAlone(t *testing.T) {
 	for i := 0; i < 15; i++ {
 		cur.closing.Store(true)
 		next := newApp(a.roots, a.state, a.claude)
-		if !next.adopt() {
-			t.Fatal("adopt failed")
+		if err := next.adopt(); err != nil {
+			t.Fatal(err)
 		}
 		next.restore()
 		got := servers(next)
@@ -1449,4 +1491,204 @@ func TestManyRestartsOfSuperdeckLeaveProcessesAlone(t *testing.T) {
 	same := cur.mgr.Get(run.ID)
 	waitFor(t, func() bool { return same.Pid() == pid })
 	t.Cleanup(func() { cur.mgr.StopAll() })
+}
+
+// ---- round two of review ----
+
+func TestFrozenHolderWithAFullQueueIsStillLeftAlone(t *testing.T) {
+	m := testManager(t)
+	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/bin/sh", "-c", "echo up; sleep 60"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(r.Tail(), "up") && r.View().Run.hpid > 0 })
+	hpid, pid := r.View().Run.hpid, r.Pid()
+	syscall.Kill(hpid, syscall.SIGSTOP)
+	defer syscall.Kill(hpid, syscall.SIGCONT)
+	// Fill its connection queue until the system starts refusing, which is
+	// what a long freeze does on its own.
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	refused := false
+	for i := 0; i < 400 && !refused; i++ {
+		c, err := net.DialTimeout("unix", r.sock(), 200*time.Millisecond)
+		if err != nil {
+			refused = holdGone(err)
+			break
+		}
+		conns = append(conns, c)
+	}
+	if !refused {
+		t.Skip("could not make the system refuse connections to a frozen holder")
+	}
+	time.Sleep(1500 * time.Millisecond) // many polls, all refused
+	if !r.alive() || !processAlive(pid) || !processAlive(hpid) {
+		t.Fatal("a frozen holder refusing connections cost a healthy process its life")
+	}
+	if _, err := os.Stat(r.sock()); err != nil {
+		t.Error("its socket was removed")
+	}
+	if !r.View().Lost {
+		t.Error("it is not shown as not responding")
+	}
+}
+
+func TestMovingTwiceOrFromAStaleTabNeverDuplicates(t *testing.T) {
+	a := testApp(t)
+	for _, n := range []string{"two", "three"} {
+		os.MkdirAll(filepath.Join(a.state, "accounts", n), 0o700)
+		os.WriteFile(filepath.Join(a.state, "accounts", n, "in"), nil, 0o600)
+	}
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	old, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(old.Tail(), "serving") })
+	// Two moves of the same (soon stale) instance at once, to different accounts.
+	var wg sync.WaitGroup
+	for _, to := range []string{"two", "three"} {
+		wg.Add(1)
+		go func() { defer wg.Done(); a.move(old, to) }()
+	}
+	wg.Wait()
+	// And another from the stale page afterwards.
+	a.move(old, "work")
+	live := 0
+	for _, v := range servers(a) {
+		if !v.Done {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Fatalf("%d instances of one folder are running", live)
+	}
+	if w := a.loadWanted(); len(w) != 1 {
+		t.Errorf("saved instances: %+v", w)
+	}
+}
+
+func TestStoppingFromAStalePageStopsTheCurrentInstance(t *testing.T) {
+	minLife, restartBase = 0, 10*time.Millisecond
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return first.Pid() > 0 })
+	syscall.Kill(-first.Pid(), syscall.SIGKILL)
+	waitFor(t, func() bool { return first.View().Next != "" })
+	second := a.mgr.Get(first.View().Next)
+	// The old page is still open somewhere, and Stop is pressed on it.
+	do(a, "POST", "/instances/"+first.ID+"/stop", url.Values{"sure": {"yes"}}, same)
+	waitFor(t, func() bool { return !second.alive() })
+	if a.isWanted("work", in(a, "app")) {
+		t.Error("still saved after being stopped")
+	}
+}
+
+func TestOldAddressLeadsToTheCurrentInstance(t *testing.T) {
+	minLife, restartBase = 0, 10*time.Millisecond
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	first, _ := a.startServer("work", in(a, "app"), "", 0, 0)
+	waitFor(t, func() bool { return first.Pid() > 0 })
+	syscall.Kill(-first.Pid(), syscall.SIGKILL)
+	waitFor(t, func() bool { return first.View().Next != "" })
+	if w := do(a, "GET", "/instances/"+first.ID, nil, ""); w.Header().Get("Location") != "/instances/"+first.View().Next {
+		t.Errorf("old address goes to %q", w.Header().Get("Location"))
+	}
+}
+
+func TestRestoreKeepsTryingWhenAFolderIsNotThereYet(t *testing.T) {
+	restartBase = 20 * time.Millisecond
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "later"), "worktree", 4}, true)
+	a.data().SetProven("work", in(a, "later"))
+	go a.restore()
+	time.Sleep(80 * time.Millisecond)                             // a few failed attempts
+	if _, err := createProject(a.roots[0], "later"); err != nil { // the disk appears
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return a.running("work", in(a, "later")) })
+}
+
+func TestLongSignInLinkIsNotCutShort(t *testing.T) {
+	m := testManager(t)
+	long := "https://claude.ai/oauth/authorize?state=" + strings.Repeat("abcdefghij", 60)
+	r := &Run{Kind: "login", Account: "a", dir: t.TempDir()}
+	if err := m.Start(r, []string{"/bin/sh", "-c", "echo 'visit: " + long + "'; printf 'Paste code here if prompted > '; read x"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return r.View().URL != "" })
+	if got := r.View().URL; got != long {
+		t.Errorf("link is %d characters, want %d", len(got), len(long))
+	}
+}
+
+func TestMessagesOnThePageCannotBeForgedByALink(t *testing.T) {
+	a := testApp(t)
+	if page := do(a, "GET", "/accounts?error=Your+session+expired.+Re-enter+your+code", nil, "").Body.String(); strings.Contains(page, "session expired") {
+		t.Error("an unsigned message was shown")
+	}
+	w := do(a, "POST", "/accounts", url.Values{"name": {"Not Valid"}}, same)
+	if page := do(a, "GET", w.Header().Get("Location"), nil, "").Body.String(); !strings.Contains(page, "Account names use") {
+		t.Error("a genuine message was not shown")
+	}
+}
+
+func TestOnlyTheTwoStaticFilesAreServed(t *testing.T) {
+	a := testApp(t)
+	for path, want := range map[string]int{"/static/app.css": 200, "/static/htmx.min.js": 200, "/static/": 404,
+		"/static/%2e%2e/templates/home.html": 404, "/nope": 404} {
+		if w := do(a, "GET", path, nil, ""); w.Code != want {
+			t.Errorf("GET %s: %d, want %d", path, w.Code, want)
+		}
+	}
+}
+
+func TestDestructiveActionsAskFirstWithoutHTMX(t *testing.T) {
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.Pid() > 0 })
+	w := do(a, "POST", "/instances/"+run.ID+"/stop", url.Values{}, same)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Are you sure?") || !run.alive() {
+		t.Fatalf("a plain form stopped the instance without asking (status %d)", w.Code)
+	}
+	do(a, "POST", "/instances/"+run.ID+"/stop", url.Values{"sure": {"yes"}}, same)
+	waitFor(t, func() bool { return !run.alive() })
+}
+
+func TestLaunchScreenIsOneOrdinaryForm(t *testing.T) {
+	a := testApp(t)
+	a.refreshStatus("work")
+	page := do(a, "GET", "/new?q=ap&account=work&folder="+url.QueryEscape(in(a, "app")), nil, "").Body.String()
+	if strings.Contains(page, ` form="`) {
+		t.Error("the launch screen relies on the form attribute again")
+	}
+	form := page[strings.Index(page, `<form method="post" action="/instances">`):]
+	form = form[:strings.Index(form, "</form>")]
+	for _, want := range []string{`name="account" value="work" required checked`, `name="folder"`, `>Launch<`, `formaction="/new"`} {
+		if !strings.Contains(form, want) {
+			t.Errorf("the launch form is missing %s", want)
+		}
+	}
+	// Enter in the filter presses the form's first button, which only filters.
+	first := form[strings.Index(form, "<button"):]
+	if !strings.HasPrefix(first, `<button type="submit" formmethod="get" formaction="/new"`) {
+		t.Errorf("the form's first button would launch: %.80s", first)
+	}
+	// Filtering as a plain form keeps what was chosen.
+	if !strings.Contains(page, `value="ap"`) || !strings.Contains(page, `value="`+in(a, "app")+`" required checked`) {
+		t.Error("filtering as a plain form lost the filter or the selection")
+	}
 }

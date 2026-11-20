@@ -54,9 +54,10 @@ h2, .label { display: block; font: 600 12px/1 var(--mono); letter-spacing: .13em
 /* Claude's own words, quoted as it printed them */
 .said { font: 13px/1.5 var(--mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 14px; }
 .backlink { display: inline-block; margin-top: 4px; padding: 11px 12px 11px 0; color: var(--muted); font-weight: 600; }
-.link { color: var(--amber); font-weight: 650; display: inline-block; padding: 9px 0; }
-.quiet { color: var(--muted); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; display: inline-block; padding: 9px 0; }
-.notice { margin: 14px 0; padding: 12px 14px; border-radius: var(--r); background: #4a1d19; color: #ffd0cb; overflow-wrap: anywhere; }
+.link { color: var(--amber); font-weight: 650; display: inline-block; padding: 11px 0; }
+.quiet { color: var(--muted); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; display: inline-block; padding: 11px 0; }
+/* something went wrong: said plainly at the top, in the colour for trouble */
+.notice { margin: 14px 0 0; color: var(--red); font-weight: 600; overflow-wrap: anywhere; }
 
 /* ---- status line ---- */
 .status { display: flex; align-items: center; gap: 9px; margin: 0 0 12px; font-size: 18px; }
@@ -120,7 +121,7 @@ input:focus { border-color: var(--amber); outline: none; }
 .row-body { flex: 1; min-width: 0; }
 .row-title { display: block; font-weight: 700; font-size: 18px; overflow-wrap: anywhere; }
 .row-sub { display: block; font: 13px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-.row-state { font: 600 12px var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.row-state { font: 600 13px var(--mono); color: var(--muted); white-space: nowrap; }
 .row-state.on { color: var(--green); }
 .row-state.wait { color: var(--amber); }
 .row-state.bad { color: var(--red); }
@@ -155,26 +156,27 @@ input:focus { border-color: var(--amber); outline: none; }
 .picker > label:has(input:checked) .tick { visibility: visible; }
 .picker > .empty { padding: 14px 12px; border-bottom: 0; font-size: 14px; }
 
-.launchbar { position: sticky; bottom: 0; margin: 20px -20px 0; padding: 14px 20px calc(env(safe-area-inset-bottom) + 14px); background: linear-gradient(transparent, var(--bg) 28%); }
+.launchbar.actions { position: sticky; bottom: 0; margin: 20px -20px 0; padding: 14px 20px calc(env(safe-area-inset-bottom) + 14px); background: linear-gradient(transparent, var(--bg) 28%); }
 
 /* ---- account name: its own edit box ---- */
 .rename { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
-.rename input[name="name"] { flex: 1; font: 800 26px/1.15 var(--round); letter-spacing: -.02em; padding: 6px 10px; margin-left: -11px; border-color: transparent; background: none; }
+.rename input[name="name"] { flex: 1; font: 800 22px/1.15 var(--round); letter-spacing: -.02em; padding: 6px 10px; margin-left: -11px; border-color: transparent; background: none; }
 .rename input[name="name"]:hover { border-color: var(--line); }
 .rename input[name="name"]:focus { border-color: var(--amber); background: #0e0c0a; }
-.rename button { display: none; }
-.rename:focus-within button { display: inline-block; }
+/* Save shows while the name is being edited. It lingers a moment after the
+   box loses focus, because some browsers blur the box before the tap on the
+   button has landed. */
+.rename button { visibility: hidden; transition: visibility 0s .5s; }
+.rename:focus-within button { visibility: visible; transition-delay: 0s; }
 
 /* ---- sign-in: one thing emphasised at a time ---- */
-.signin form { display: grid; gap: 10px; }
-.signin .open { margin: 8px 0 26px; background: var(--amber); color: var(--amber-ink); font-weight: 800; }
+.signin .code { display: grid; gap: 10px; margin: 16px 0 6px; }
+.signin .open { background: var(--amber); color: var(--amber-ink); font-weight: 800; }
 .signin label { font: 600 12px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); }
 .signin #code { font: 17px/1.3 var(--mono); padding: 15px 14px; }
 /* once a code is in the box, the emphasis moves from "open" to "finish" */
 .signin:has(#code:valid) .open { background: var(--raised); color: var(--text); font-weight: 650; }
 .signin:has(#code:valid) .finish { background: var(--amber); color: var(--amber-ink); font-weight: 800; }
-.signin .cancel { margin-top: 14px; }
-.signin .cancel button { width: 100%; padding: 13px; color: var(--muted); font-weight: 600; border-radius: var(--r); }
 
 /* ---- terminal ---- */
 .screen {

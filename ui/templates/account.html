@@ -21,4 +21,5 @@
 <h2>Running under this account</h2>
 <div class="rows">{{range .Running}}{{template "instance-row" .}}{{end}}</div>
 {{end}}
+{{if .Checking}}<div hx-get="/refresh" hx-trigger="load delay:2s" hx-swap="none"></div>{{end}}
 {{template "foot" .}}

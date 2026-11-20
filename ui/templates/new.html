@@ -1,34 +1,35 @@
 {{template "head" .}}
 <a class="backlink" href="/">‹ Instances</a>
 <h1>New instance</h1>
-<form id="launch" method="post" action="/instances"></form>
+<form method="post" action="/instances">
+  <button type="submit" formmethod="get" formaction="/new" formnovalidate hidden>Filter</button>
 
-<h2>Account</h2>
-{{if .Accounts}}
-<div class="chips">
-  {{range .Accounts}}
-  <label class="chip{{if not .SignedIn}} off{{end}}"{{if not .SignedIn}} title="{{.Name}} is {{.Who}}"{{end}}>
-    <input type="radio" name="account" value="{{.ID}}" form="launch" required{{if .Selected}} checked{{end}}{{if not .SignedIn}} disabled{{end}}>
-    <span class="led{{if .SignedIn}} on{{end}}"></span>{{.Name}}
-  </label>
+  <h2>Account</h2>
+  {{if .Accounts}}
+  <div class="chips">
+    {{range .Accounts}}
+    <label class="chip{{if not .SignedIn}} off{{end}}"{{if not .SignedIn}} title="{{.Name}} is {{.Who}}"{{end}}>
+      <input type="radio" name="account" value="{{.ID}}" required{{if .Selected}} checked{{end}}{{if not .SignedIn}} disabled{{end}}>
+      <span class="led{{if .SignedIn}} on{{end}}"></span>{{.Name}}
+    </label>
+    {{end}}
+  </div>
+  {{if not .Usable}}<p class="small">None of these is signed in. <a class="link" href="/accounts">Sign one in</a> to launch.</p>{{end}}
+  {{else}}
+  <p class="small">There are no accounts yet. <a class="link" href="/accounts/new">Add one</a> to launch.</p>
   {{end}}
-</div>
-{{if not .Usable}}<p class="small">None of these is signed in. <a class="link" href="/accounts">Sign one in</a> to launch.</p>{{end}}
-{{else}}
-<p class="small">There are no accounts yet. <a class="link" href="/accounts/new">Add one</a> to launch.</p>
-{{end}}
 
-<h2><label for="q">Folder</label></h2>
-<form method="get" action="/new" role="search">
+  <h2><label for="q">Folder</label></h2>
   <input id="q" type="search" name="q" value="{{.Q}}" placeholder="Filter {{.Total}} folders"
     hx-get="/new/folders" hx-trigger="input changed delay:120ms" hx-target="#folders" hx-swap="outerHTML"
     hx-include="[name='folder']:checked"
     autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-</form>
-{{template "folder-list" .}}
-<p class="small"><a class="quiet" href="/folders/new">Create a new folder</a></p>
+  {{template "folder-list" .}}
+  <p class="small"><a class="quiet" href="/folders/new">Create a new folder</a></p>
 
-<div class="launchbar">
-  <button class="btn primary big" form="launch"{{if or (not .Usable) (not .Total)}} disabled{{end}}>Launch</button>
-</div>
+  <div class="launchbar actions">
+    <button class="btn primary big"{{if or (not .Usable) (not .Total)}} disabled{{end}}>Launch</button>
+  </div>
+</form>
+{{if .Checking}}<div hx-get="/refresh" hx-trigger="load delay:2s" hx-swap="none"></div>{{end}}
 {{template "foot" .}}

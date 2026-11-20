@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -49,6 +50,16 @@ type App struct {
 	checking map[string]bool // accounts with a status check in flight
 	checkSem chan struct{}   // how many `claude auth status` may run at once
 
+	acctMu sync.Mutex // adding and removing accounts
+	opMu   sync.Mutex
+	ops    map[string]*sync.Mutex // one per folder; see folderLock
+
+	flash []byte // signs the one-line messages carried across a redirect
+
+	rateMu sync.Mutex
+	rateAt time.Time
+	tokens float64
+
 	folderMu sync.Mutex
 	folderAt time.Time
 	folderLs []folder
@@ -57,7 +68,10 @@ type App struct {
 func newApp(roots []string, state, claude string) *App {
 	a := &App{roots: roots, state: state, claude: claude, started: time.Now(),
 		status: map[string]map[string]any{}, statusAt: map[string]time.Time{}, hosts: map[string]bool{},
-		checking: map[string]bool{}, checkSem: make(chan struct{}, 2)}
+		checking: map[string]bool{}, checkSem: make(chan struct{}, 2), ops: map[string]*sync.Mutex{}}
+	a.tokens, a.rateAt = 12, time.Now()
+	a.flash = make([]byte, 32)
+	rand.Read(a.flash)
 	self, err := os.Executable()
 	if err != nil {
 		self = os.Args[0]
@@ -67,6 +81,7 @@ func newApp(roots []string, state, claude string) *App {
 	a.mgr.onStart = func(r *Run) error { return a.data().SaveRun(r) }
 	a.mgr.onStop = func(r *Run) { a.data().MarkStopped(r.ID) }
 	a.mgr.onEnd = func(r *Run) { a.data().EndRun(r.ID, r.View().ExitCode) }
+	a.mgr.onHolder = func(id string, hpid int) { a.data().SetHolder(id, hpid) }
 	return a
 }
 
@@ -179,10 +194,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if a.adopt() {
-		go a.restore()
-	} else {
-		log.Print("not launching saved instances: could not tell what is already running")
+	// Without knowing what is already running, anything launched could be a
+	// duplicate. Stop here; launchd will try again.
+	if err := a.adopt(); err != nil {
+		log.Fatal(err)
+	}
+	go a.restore()
+	for _, f := range []string{"superdeck.log", "holders.log"} {
+		os.Chmod(filepath.Join(a.state, f), 0o600)
 	}
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -227,14 +246,15 @@ func (a *App) guard(next http.Handler) http.Handler {
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			u, err := url.Parse(r.Header.Get("Origin"))
-			if err != nil || u.Host != r.Host {
+			if err != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
 				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}
 			// With no sign-in, this log is the only record of who did what.
 			from, _, _ := net.SplitHostPort(r.RemoteAddr)
-			log.Printf("%s %s from %s", r.Method, r.URL.Path, from)
-		} else if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" {
+			// Quoted, so nothing in an address can pass for a line of its own.
+			log.Printf("%s %q from %s", r.Method, r.URL.EscapedPath(), from)
+		} else if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" || site == "same-site" {
 			// Another site has no business even reading these pages, and
 			// should not be able to make this Mac do work by embedding them.
 			http.Error(w, "cross-site request refused", http.StatusForbidden)
@@ -246,6 +266,11 @@ func (a *App) guard(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 		w.Header().Set("Cache-Control", "no-store")
+		if strings.HasPrefix(r.URL.Path, "/static/") && r.URL.Query().Get("v") == assetVersion {
+			// Stylesheet and script are addressed by a fingerprint of their
+			// contents, so they can be kept until they change.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -389,8 +414,17 @@ func (a *App) checkSoon(name string) {
 func (a *App) folderList() []folder {
 	a.folderMu.Lock()
 	defer a.folderMu.Unlock()
-	if a.folderLs == nil || time.Since(a.folderAt) > 5*time.Second {
+	switch {
+	case a.folderLs == nil:
 		a.folderLs, a.folderAt = listProjects(a.roots), time.Now()
+	case time.Since(a.folderAt) > 5*time.Second:
+		a.folderAt = time.Now() // one walk at a time
+		go func() {
+			ls := listProjects(a.roots)
+			a.folderMu.Lock()
+			a.folderLs = ls
+			a.folderMu.Unlock()
+		}()
 	}
 	return a.folderLs
 }
@@ -406,7 +440,7 @@ func (a *App) offered(dir string) bool {
 			}
 		}
 		a.folderMu.Lock()
-		a.folderLs = nil // it may have been created a moment ago
+		a.folderLs = nil // it may have been created a moment ago; look again now
 		a.folderMu.Unlock()
 	}
 	return false

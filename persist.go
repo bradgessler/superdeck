@@ -78,7 +78,8 @@ func (a *App) running(accountID, folder string) bool {
 
 // restore launches every remembered instance that is not already running, for
 // example after the Mac has rebooted. Each one goes through the same
-// validation as a fresh launch, so edited data gains nothing.
+// validation as a fresh launch, so edited data gains nothing. One that cannot
+// be started yet is retried.
 func (a *App) restore() {
 	for _, w := range a.loadWanted() {
 		if !filepath.IsAbs(w.Project) && len(a.roots) > 0 {
@@ -87,13 +88,9 @@ func (a *App) restore() {
 			w.Project = filepath.Join(a.roots[0], w.Project)
 			a.remember(old, false)
 			a.remember(w, true)
+			a.data().SetProven(w.Account, w.Project)
 		}
-		if a.running(w.Account, w.Project) {
-			continue // its holder kept it going while Superdeck was away
-		}
-		if _, err := a.startServer(w.Account, w.Project, w.Spawn, w.Capacity, 0); err != nil {
-			log.Printf("could not bring back %s as %s: %v", w.Project, w.Account, err)
-		}
+		a.bringBack(w, 1)
 	}
 }
 
