@@ -1395,3 +1395,58 @@ func TestUnknownAddressesGetAPageWithAWayBack(t *testing.T) {
 		}
 	}
 }
+
+func TestHolderWhoseSocketIsDeletedShutsDownInOrderAndIsReplaced(t *testing.T) {
+	minLife, restartBase = 0, 10*time.Millisecond
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	first, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return strings.Contains(first.Tail(), "serving") && first.View().Run.hpid > 0 })
+	hpid, pid := first.View().Run.hpid, first.Pid()
+	// Its socket disappears, as a temporary-files cleaner might do. The
+	// holder and Claude are both still alive but can no longer be reached.
+	os.Remove(first.sock())
+	waitFor(t, func() bool { return !first.alive() })
+	waitFor(t, func() bool { return !processAlive(hpid) && !processAlive(pid) })
+	// It was not left running unseen, and a reachable one took its place.
+	waitFor(t, func() bool {
+		live := 0
+		for _, v := range servers(a) {
+			if !v.Done {
+				live++
+			}
+		}
+		return live == 1
+	})
+}
+
+func TestManyRestartsOfSuperdeckLeaveProcessesAlone(t *testing.T) {
+	a := testApp(t)
+	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.Pid() > 0 })
+	pid := run.Pid()
+	cur := a
+	for i := 0; i < 15; i++ {
+		cur.closing.Store(true)
+		next := newApp(a.roots, a.state, a.claude)
+		if !next.adopt() {
+			t.Fatal("adopt failed")
+		}
+		next.restore()
+		got := servers(next)
+		if len(got) != 1 || got[0].Done || got[0].ID != run.ID {
+			t.Fatalf("restart %d: %+v", i, got)
+		}
+		cur = next
+	}
+	same := cur.mgr.Get(run.ID)
+	waitFor(t, func() bool { return same.Pid() == pid })
+	t.Cleanup(func() { cur.mgr.StopAll() })
+}
