@@ -71,7 +71,7 @@ It prints the notes the last session left for this folder, when it left them, an
 "$SUPERDECK" answer INSTANCE yes    # or no
 ```
 
-`launch` starts Claude under an account in a folder and tells you how it went. Often the new instance stops to ask something first: whether to trust the folder, or whether to turn on Remote Control for the account. **You do not answer these yourself.** They are the user's decisions about their own Mac. Put the question to the user as Superdeck reported it, including the folder's path, as a yes or no they can tap (see Asking the user), and run `answer` only with what they tell you in this conversation. A trust question for a folder the user did not ask you to launch in is a reason to stop and check, not to answer.
+`launch` starts Claude under an account in a folder and tells you how it went. Often the new instance stops to ask something first, usually whether to trust the folder. (Superdeck itself says yes when Claude asks whether to turn on Remote Control for an account, since launching here is asking for that; you should not normally see that question.) **You do not answer these yourself.** They are the user's decisions about their own Mac. Put the question to the user as Superdeck reported it, including the folder's path, as a yes or no they can tap (see Asking the user), and run `answer` only with what they tell you in this conversation. A trust question for a folder the user did not ask you to launch in is a reason to stop and check, not to answer.
 
 Once it is connected, the user finds it in the Claude app under Code; `status` gives its address.
 

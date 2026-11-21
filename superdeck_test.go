@@ -141,6 +141,12 @@ case "$1 $2" in
       printf "Trust %s? [y/N] " "$PWD"; read x
       if [ "$x" != "y" ]; then echo "Workspace not trusted"; exit 1; fi
     fi
+    if [ -f "$C/asks-consent" ]; then
+      echo "Remote Control lets you access this CLI session from the web or the Claude app."
+      printf "Enable Remote Control? (y/n) "; read x
+      if [ "$x" != "y" ]; then echo "Remote Control was not enabled"; exit 1; fi
+      rm -f "$C/asks-consent"; echo "consented=$x"
+    fi
     if [ -f "$C/asks-other" ]; then printf "Share anonymous usage data? (y/n) "; read x; echo "answered=$x"; fi
     echo "serving $*"
     echo "reach=$SUPERDECK_ACCOUNT|$SUPERDECK_FOLDER|$SUPERDECK_SOCK"
@@ -178,6 +184,7 @@ func testApp(t *testing.T) *App {
 
 func init() {
 	pollEvery, answerWait, startGrace = 25*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond
+	consentEvery = 30 * time.Millisecond
 }
 
 // The test binary doubles as the holder: Superdeck starts holders by

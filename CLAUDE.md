@@ -57,7 +57,7 @@ go build -o superdeck . && ./superdeck ~/Projects
 - Look at a changed screen in a browser at phone width and desktop width before calling it done. Anything you tap gets tried in iOS Safari (the simulator will do): touch behaves differently from a narrow desktop window.
 - Restarting Superdeck does not touch instances: their holders keep them alive. Killing a holder (`superdeck hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.
 - **Never run crash tests against someone's real instances.** Build a separate copy with its own `-state`, port and the stand-in CLI. A real session was lost this way once.
-- Never trust a folder or accept a consent prompt on the owner's behalf while testing against real Claude. Stop at the prompt.
+- Never trust a folder on the owner's behalf, in code or while testing against real Claude. Stop at the prompt. The one question Superdeck answers itself is Claude's once-per-account "Enable Remote Control?" (`turnOnRemoteControl`): the owner asked for that, because launching here is asking for Remote Control. Do not add another.
 - Do not put real email addresses, host names or home-directory paths in the repository. Use the stand-in for screenshots.
 
 ## Skills

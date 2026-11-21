@@ -328,3 +328,29 @@ func TestLaunchingUnderAnotherLoginSaysToSwitch(t *testing.T) {
 		t.Errorf("the same login: %d %q", code, out)
 	}
 }
+
+// Launching through Superdeck is asking for Remote Control, so the question
+// Claude asks once per account about turning it on is answered yes without
+// troubling anyone. Whether to trust a folder is still the owner's to answer.
+func TestRemoteControlIsTurnedOnWithoutAsking(t *testing.T) {
+	a := testApp(t)
+	cfg := filepath.Join(a.state, "accounts", "work")
+	os.WriteFile(filepath.Join(cfg, "asks-trust"), nil, 0o600)
+	os.WriteFile(filepath.Join(cfg, "asks-consent"), nil, 0o600)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.View().Hint == "needs-trust" })
+	time.Sleep(10 * consentEvery)
+	if v := run.View(); v.Hint != "needs-trust" || v.Done {
+		t.Fatalf("the trust question was answered for the owner: %q done=%v", v.Hint, v.Done)
+	}
+	if err := answer(run, true); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return run.View().Link != "" })
+	if !strings.Contains(run.Tail(), "consented=y") {
+		t.Errorf("Remote Control was not turned on: %s", run.Tail())
+	}
+}

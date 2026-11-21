@@ -288,7 +288,7 @@ func (a *App) instance(v RunView) instanceView {
 		iv.Lede = "Claude is asking whether to trust this folder before it works here. Only trust folders whose contents you know."
 	case v.Hint == "needs-consent" && !v.Done:
 		iv.State, iv.Cls, iv.Do = "needs you", "wait", "consent"
-		iv.Lede = "Claude is asking to turn on Remote Control for " + name + ". It asks once per account, and it is what lets the Claude app reach instances on this Mac."
+		iv.Lede = "Claude is asking to turn on Remote Control for " + name + ". It asks once per account, and it is what lets the Claude app reach instances on this Mac. Superdeck normally says yes for you; if this is still here, answer it below."
 	case v.Hint == "needs-answer":
 		iv.State, iv.Cls, iv.Do, iv.Question = "needs you", "wait", "question", v.Question
 		iv.Lede = "Claude is asking a question."

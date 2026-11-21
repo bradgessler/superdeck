@@ -294,8 +294,38 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 		return nil, err
 	}
 	a.proveLater(run)
+	go a.turnOnRemoteControl(run)
 	return run, nil
 }
+
+// turnOnRemoteControl answers yes to the one question Superdeck answers by
+// itself. The first time an account runs `claude remote-control`, Claude asks
+// whether to turn Remote Control on for it. Launching an instance here is
+// already a request for exactly that, and the owner asked not to be asked
+// twice. Nothing else is answered this way: whether to trust a folder, and
+// any question Superdeck does not recognise, still wait for a person.
+//
+// If typing the answer fails, the question stays on the instance's page with
+// its button, as before.
+func (a *App) turnOnRemoteControl(run *Run) {
+	for tries := 0; tries < 3 && !a.closing.Load(); time.Sleep(consentEvery) {
+		v := run.View()
+		if v.Done || v.Link != "" {
+			return
+		}
+		if v.Hint != "needs-consent" {
+			continue
+		}
+		tries++
+		if err := answer(run, true); err != nil {
+			log.Printf("turning on Remote Control for %s: %v", a.accountName(run.Account), err)
+			continue
+		}
+		log.Printf("turned on Remote Control for %s (Claude asks once per account)", a.accountName(run.Account))
+	}
+}
+
+var consentEvery = 500 * time.Millisecond
 
 // proveLater marks an instance as proven once it has lived a while. From
 // then on it is retried however often it fails.
@@ -722,6 +752,7 @@ func (a *App) adoptOne(r *Run) {
 				a.expire(r)
 			case "server":
 				a.proveLater(r)
+				go a.turnOnRemoteControl(r)
 				// Superdeck went down in the middle of relaunching or
 				// moving it: marked to stop, never stopped, still wanted.
 				if r.wasStopped() && a.isWanted(r.Account, r.Project) {

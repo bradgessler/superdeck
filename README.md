@@ -225,6 +225,8 @@ A conversation that was in progress when Claude itself was killed is lost; Super
 | 9 | Does `claude update` behave when run from here? | **Open.** |
 | 10 | Is passing a sign-in code through this page within Anthropic's terms for third-party tools? | **Open.** Superdeck hands the code straight to the official binary and stores nothing. Read the [terms](https://code.claude.com/docs/en/legal-and-compliance). |
 
+The first time an account runs Remote Control, Claude asks whether to turn it on for that account. Superdeck answers yes for you: launching an instance is asking for exactly that. It answers nothing else. Whether to trust a folder is always put to you.
+
 On Team and Enterprise plans an owner has to turn Remote Control on before any of this works.
 
 Instances run with their account's config directory, not `~/.claude`. Skills, MCP servers and settings you keep in `~/.claude` are not available inside them; what is in the project folder is.
