@@ -123,13 +123,13 @@ func (a *App) addAccount(name string) (string, error) {
 		return "", errors.New("account names use lowercase letters, digits and dashes")
 	}
 	if name == "new" { // /accounts/new is the screen for adding one
-		return "", errors.New("that name is one Superdeck uses itself; pick another")
+		return "", errors.New("that name is one Switcharoo uses itself; pick another")
 	}
 	if a.nameTaken(name, "") {
 		return "", errors.New("an account already has that name")
 	}
 	if len(a.accountList()) >= maxAccounts {
-		return "", errors.New("that is as many accounts as Superdeck keeps; remove one first")
+		return "", errors.New("that is as many accounts as Switcharoo keeps; remove one first")
 	}
 	id := name
 	if _, err := os.Stat(filepath.Join(a.state, "accounts", id)); err == nil {
@@ -229,7 +229,7 @@ func (a *App) current(r *Run) *Run {
 	return a.liveTwin(r)
 }
 
-// liveTwin covers a run that ended and was not replaced through Superdeck's
+// liveTwin covers a run that ended and was not replaced through Switcharoo's
 // own chain: someone stopped it and later launched the same account in the
 // same folder afresh. A stale page for the old run then means the new one;
 // acting on the old one's record would forget the instance that is running.
@@ -259,7 +259,7 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 		return nil, err
 	}
 	if !a.offered(dir) {
-		return nil, errors.New("that folder is not one Superdeck can launch in")
+		return nil, errors.New("that folder is not one Switcharoo can launch in")
 	}
 	if spawn == "" {
 		// A repository gives each session its own worktree. A folder that only
@@ -298,12 +298,12 @@ func (a *App) startServer(accountID, project, spawn string, capacity, restarts i
 	return run, nil
 }
 
-// turnOnRemoteControl answers yes to the one question Superdeck answers by
+// turnOnRemoteControl answers yes to the one question Switcharoo answers by
 // itself. The first time an account runs `claude remote-control`, Claude asks
 // whether to turn Remote Control on for it. Launching an instance here is
 // already a request for exactly that, and the owner asked not to be asked
 // twice. Nothing else is answered this way: whether to trust a folder, and
-// any question Superdeck does not recognise, still wait for a person.
+// any question Switcharoo does not recognise, still wait for a person.
 //
 // If typing the answer fails, the question stays on the instance's page with
 // its button, as before.
@@ -361,7 +361,7 @@ func (a *App) serverExited(r *Run) {
 	w := wanted{Account: r.Account, Project: r.Project}
 	switch v.Hint {
 	case "needs-login":
-		// Right after Superdeck starts, the Keychain may not be readable
+		// Right after Switcharoo starts, the Keychain may not be readable
 		// yet. Try a few times before believing it.
 		if time.Since(a.started) < 10*time.Minute && r.Restarts < 3 {
 			log.Printf("%s reported signed out soon after startup; retrying in %s (attempt %d)", r.Name, bootRetry, r.Restarts+1)
@@ -424,7 +424,7 @@ func (a *App) restart(r *Run, n int) {
 
 // bringBack starts a remembered instance that is not running, and keeps
 // trying if it cannot be started yet: a folder on a disk that is not mounted,
-// say. Used when Superdeck starts and when an account is signed in.
+// say. Used when Switcharoo starts and when an account is signed in.
 func (a *App) bringBack(w wanted, n int) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -478,7 +478,7 @@ func (a *App) canStart(accountID, folder string, replacing *Run) error {
 		return err
 	}
 	if !a.offered(dir) {
-		return errors.New("that folder is not one Superdeck can launch in")
+		return errors.New("that folder is not one Switcharoo can launch in")
 	}
 	servers := 0
 	for _, v := range a.mgr.List() {
@@ -534,7 +534,7 @@ func (a *App) relaunch(old *Run) (*Run, error) {
 		// that: have it retried like any instance that died.
 		old.unstop()
 		a.scheduleRestart(old, 1, restartBase)
-		return nil, fmt.Errorf("it could not be started again just now (%w); Superdeck will keep trying", err)
+		return nil, fmt.Errorf("it could not be started again just now (%w); Switcharoo will keep trying", err)
 	}
 	old.setNext(run.ID)
 	return run, nil
@@ -575,7 +575,7 @@ func (a *App) move(old *Run, to string) (*Run, error) {
 		if berr != nil {
 			old.unstop()
 			a.scheduleRestart(old, 1, restartBase)
-			return nil, fmt.Errorf("could not start it under %s (%w); Superdeck is bringing it back under %s", a.accountName(to), err, a.accountName(old.Account))
+			return nil, fmt.Errorf("could not start it under %s (%w); Switcharoo is bringing it back under %s", a.accountName(to), err, a.accountName(old.Account))
 		}
 		old.setNext(back.ID)
 		return nil, fmt.Errorf("could not start it under %s (%w), so it is running under %s again", a.accountName(to), err, a.accountName(old.Account))
@@ -703,7 +703,7 @@ func (a *App) expire(run *Run) {
 	})
 }
 
-// adopt picks up the processes that were running when Superdeck last exited.
+// adopt picks up the processes that were running when Switcharoo last exited.
 // The ones still being held carry on untouched; the ones that are gone are
 // recorded as ended. If it cannot read the record it says so, and nothing
 // may be launched: every held instance would get a duplicate.
@@ -725,7 +725,7 @@ func (a *App) adopt() error {
 			continue
 		}
 		if holdSay(filepath.Join(a.mgr.dir, id+".sock"), "stop") == nil {
-			log.Printf("stopped a process Superdeck had no record of (%s)", id)
+			log.Printf("stopped a process Switcharoo had no record of (%s)", id)
 		}
 		a.mgr.Forget(id)
 	}
@@ -734,7 +734,7 @@ func (a *App) adopt() error {
 }
 
 // adoptOne picks up one recorded process. Whatever is wrong with one record
-// must not keep Superdeck from starting: a Superdeck that cannot start cannot
+// must not keep Switcharoo from starting: a Switcharoo that cannot start cannot
 // be reached to put anything right. A record that cannot be dealt with is
 // left as it is, with its process untouched.
 func (a *App) adoptOne(r *Run) {
@@ -753,7 +753,7 @@ func (a *App) adoptOne(r *Run) {
 			case "server":
 				a.proveLater(r)
 				go a.turnOnRemoteControl(r)
-				// Superdeck went down in the middle of relaunching or
+				// Switcharoo went down in the middle of relaunching or
 				// moving it: marked to stop, never stopped, still wanted.
 				if r.wasStopped() && a.isWanted(r.Account, r.Project) {
 					r.unstop()
@@ -761,7 +761,7 @@ func (a *App) adoptOne(r *Run) {
 				}
 			}
 			log.Printf("still running: %s", r.Name)
-		default: // it ended, or vanished, while Superdeck was away
+		default: // it ended, or vanished, while Switcharoo was away
 			a.data().EndRun(r.ID, code)
 			a.mgr.Forget(r.ID)
 		}

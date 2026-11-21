@@ -1,9 +1,9 @@
 ---
-name: superdeck-ui
-description: How Superdeck's screens should be organised and styled. Read before changing any template in ui/templates or ui/static/app.css, or adding a screen.
+name: switcharoo-ui
+description: How Switcharoo's screens should be organised and styled. Read before changing any template in ui/templates or ui/static/app.css, or adding a screen.
 ---
 
-# Superdeck UI
+# Switcharoo UI
 
 The owner's standard is high fit and finish with less on the screen. Earlier versions were rejected for cramming things onto one page, boxing everything, scattering buttons, and showing a raw terminal. Do not repeat those.
 
@@ -15,7 +15,7 @@ The owner's standard is high fit and finish with less on the screen. Earlier ver
 - **No inline "type a name, press Add" forms on list screens.**
 - **Edit in place on the thing's own screen** where it is natural: an account's name is an input styled as the title, with Save appearing when it has focus.
 - **No raw terminal on a status screen.** Say what is happening in a sentence and offer the buttons that matter. The terminal lives on its own screen behind a "Terminal" action.
-- **A question from Claude is shown as a question** with the answers as buttons. For a question Superdeck does not recognise, show Claude's own words with Yes and No.
+- **A question from Claude is shown as a question** with the answers as buttons. For a question Switcharoo does not recognise, show Claude's own words with Yes and No.
 
 ## Layout
 

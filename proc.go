@@ -82,6 +82,7 @@ func runDir(state string) string {
 	dir := filepath.Join(state, "run")
 	if len(dir) > 70 {
 		sum := sha256.Sum256([]byte(state))
+		// The old name stays: a holder started before the rename is found by this path.
 		name := "superdeck-" + hex.EncodeToString(sum[:6])
 		if runBase != "" {
 			return filepath.Join(runBase, name)
@@ -154,7 +155,7 @@ func parentOf(pid int) int {
 }
 
 // Run is one claude process. It is kept alive by a holder (see hold.go), not
-// by Superdeck, so it carries on while Superdeck restarts. Superdeck reads its
+// by Switcharoo, so it carries on while Switcharoo restarts. Switcharoo reads its
 // output from the holder and replays it through a terminal emulator to know
 // what is on its screen.
 type Run struct {
@@ -398,7 +399,7 @@ func (r *Run) unstop() {
 
 // feed passes output to the terminal emulator. The emulator is third-party
 // code parsing whatever a process prints, so a panic in it must never take
-// Superdeck down. If it does panic, this run falls back to plain text.
+// Switcharoo down. If it does panic, this run falls back to plain text.
 // Call with r.mu held.
 func (r *Run) feed(b []byte, reset bool) {
 	defer func() {
@@ -506,7 +507,7 @@ func (r *Run) read() bool {
 // one-sided: a process is never signalled while its holder is alive. A holder
 // that is slow, frozen, swamped or cut off from its socket is left alone, for
 // as long as it takes; killing a healthy Claude over a holder that would have
-// answered is the worst thing Superdeck can do. Call with r.mu held.
+// answered is the worst thing Switcharoo can do. Call with r.mu held.
 func (r *Run) unreachable(err error) bool {
 	base := strings.TrimSuffix(r.sock(), ".sock")
 	// An exit record means it ended in an orderly way and says how.
@@ -534,7 +535,7 @@ func (r *Run) unreachable(err error) bool {
 	if r.fails < 4 || time.Since(r.Started) < startGrace {
 		return true
 	}
-	// Holders started by an older Superdeck do not say who they are; the
+	// Holders started by an older Switcharoo do not say who they are; the
 	// process's parent is its holder.
 	if r.hpid == 0 && processAlive(r.pid) {
 		if r.hpid = parentOf(r.pid); r.hpid == 0 {
@@ -544,7 +545,7 @@ func (r *Run) unreachable(err error) bool {
 	if holderAlive(r.hpid, r.sock()) || someoneHolds(r.sock()) {
 		return true // alive but not answering: leave it be
 	}
-	// Nothing at all is known about it (never reached since Superdeck
+	// Nothing at all is known about it (never reached since Switcharoo
 	// started). Give it a good while before believing it is gone.
 	if r.hpid == 0 && r.pid == 0 && r.fails < 150 {
 		return true
@@ -693,7 +694,7 @@ func (r *Run) render() (out template.HTML) {
 type Manager struct {
 	onHolder func(id string, hpid, pid int) // record which processes a run is
 
-	self    string           // this program, re-run as `superdeck hold`
+	self    string           // this program, re-run as `switcharoo hold`
 	dir     string           // where holders keep their sockets
 	log     string           // where holders write their own errors
 	onStart func(*Run) error // record a new process; an error cancels the launch
@@ -708,7 +709,7 @@ func NewManager(self, state string) *Manager {
 	return &Manager{self: self, dir: runDir(state), log: filepath.Join(state, "holders.log"), runs: map[string]*Run{}}
 }
 
-// Probe asks about a run that was started before Superdeck restarted:
+// Probe asks about a run that was started before Switcharoo restarted:
 // "held" (still being kept alive), "ended" (it exited and left a record, with
 // its exit code) or "gone" (nothing is there). It takes a lot to be believed
 // gone: no exit record, nothing listening after several tries, and no holder
@@ -771,7 +772,7 @@ func (m *Manager) Leftovers() []string {
 	var ids []string
 	for _, e := range es {
 		id, _, _ := strings.Cut(e.Name(), ".")
-		if id == "control" { // the socket sessions use to reach Superdeck; see control.go
+		if id == "control" { // the socket sessions use to reach Switcharoo; see control.go
 			continue
 		}
 		if id != "" && !seen[id] {
@@ -851,7 +852,7 @@ func (m *Manager) check(r *Run) error {
 }
 
 // Start launches argv under a new holder. The holder is this same program,
-// started in its own session so that it does not die with Superdeck. It is
+// started in its own session so that it does not die with Switcharoo. It is
 // given argv as separate arguments and env as its whole environment; no shell
 // is involved.
 func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
@@ -893,7 +894,7 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 	if err := cmd.Start(); err != nil {
 		return fail(err)
 	}
-	go cmd.Wait() // reap it if it ends while Superdeck is still here
+	go cmd.Wait() // reap it if it ends while Switcharoo is still here
 
 	// Wait for the holder to be reachable, or to have already finished.
 	base := strings.TrimSuffix(r.sock(), ".sock")
@@ -909,7 +910,7 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 			return fail(errors.New("the process could not be started"))
 		}
 	}
-	// A process Superdeck has no record of could never be found again after
+	// A process Switcharoo has no record of could never be found again after
 	// a restart, so one that cannot be recorded is not allowed to run.
 	if m.onStart != nil {
 		if err := m.onStart(r); err != nil {
@@ -920,7 +921,7 @@ func (m *Manager) Start(r *Run, argv, env []string, onExit func(*Run)) error {
 	return nil
 }
 
-// Adopt takes over a run that was started before Superdeck restarted and is
+// Adopt takes over a run that was started before Switcharoo restarted and is
 // still held.
 func (m *Manager) Adopt(r *Run, onExit func(*Run)) {
 	// The process id came from the record. Since it was written the Mac may
@@ -937,7 +938,7 @@ func (m *Manager) Adopt(r *Run, onExit func(*Run)) {
 	go r.watch()
 }
 
-// StopAll stops every process. Superdeck does not call this when it exits:
+// StopAll stops every process. Switcharoo does not call this when it exits:
 // leaving processes running is the point. Tests do. It keeps going until
 // nothing is left, because a restart that was already under way can add a run
 // after the first pass.

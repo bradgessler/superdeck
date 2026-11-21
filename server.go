@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -81,7 +82,7 @@ func newApp(roots []string, state, claude string) *App {
 		self = os.Args[0]
 	}
 	a.mgr = NewManager(self, state)
-	// Every process is recorded, so a restarted Superdeck knows what is being held.
+	// Every process is recorded, so a restarted Switcharoo knows what is being held.
 	a.mgr.onStart = func(r *Run) error { return a.data().SaveRun(r) }
 	a.mgr.onStop = func(r *Run) { a.data().MarkStopped(r.ID) }
 	a.mgr.onEnd = func(r *Run) { a.data().EndRun(r.ID, r.View().ExitCode) }
@@ -89,43 +90,85 @@ func newApp(roots []string, state, claude string) *App {
 	return a
 }
 
+// Version is set when a release is built. A copy built with `go install`
+// reports the module version Go recorded instead.
+var Version = ""
+
+func version() string {
+	if Version != "" {
+		return Version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
+
+// Switcharoo was called Superdeck until November 2026. An account's config
+// directory can never move, because Claude ties the account's login to that
+// path, so a Mac set up under the old name keeps its state where it is: the
+// old directory, and the old database inside it, are used when they are there
+// and the new ones are not.
+func defaultState(home string) string {
+	now, was := filepath.Join(home, ".switcharoo"), filepath.Join(home, ".superdeck")
+	if _, err := os.Stat(now); err != nil {
+		if _, err := os.Stat(was); err == nil {
+			return was
+		}
+	}
+	return now
+}
+
+func dataPath(state string) string {
+	now, was := filepath.Join(state, "switcharoo.db"), filepath.Join(state, "superdeck.db")
+	if _, err := os.Stat(now); err != nil {
+		if _, err := os.Stat(was); err == nil {
+			return was
+		}
+	}
+	return now
+}
+
 func main() {
 	home, _ := os.UserHomeDir()
-	// Two other ways this program is run. `hold` is Superdeck starting a
+	// Two other ways this program is run. `hold` is Switcharoo starting a
 	// holder for one process; `attach` connects your terminal to one.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "hold":
 			os.Exit(holdMain(os.Args[2:]))
+		case "version", "-version", "--version":
+			fmt.Println("switcharoo " + version())
+			return
 		case "attach":
-			os.Exit(attachMain(filepath.Join(home, ".superdeck"), os.Args[2:]))
-		default: // commands to the running Superdeck; see control.go
+			os.Exit(attachMain(defaultState(home), os.Args[2:]))
+		default: // commands to the running Switcharoo; see control.go
 			if _, ok := controlCommands[os.Args[1]]; ok {
-				os.Exit(controlMain(filepath.Join(home, ".superdeck"), os.Args[1], os.Args[2:], os.Stdin, os.Stdout))
+				os.Exit(controlMain(defaultState(home), os.Args[1], os.Args[2:], os.Stdin, os.Stdout))
 			}
 		}
 	}
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on (use the Mac's LAN address to reach it over a VPN)")
-	state := flag.String("state", filepath.Join(home, ".superdeck"), "directory for per-account Claude config")
+	state := flag.String("state", defaultState(home), "directory for per-account Claude config")
 	claude := flag.String("claude", "", "path to the claude binary (default: found on PATH)")
 	extra := flag.String("hosts", "", "extra Host header values to accept, comma separated")
-	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Superdeck at login with these settings, then exit")
+	agent := flag.Bool("launch-agent", false, "print a launchd agent that runs Switcharoo at login with these settings, then exit")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: superdeck [flags] FOLDER...\n       superdeck attach [ID]\n       superdeck COMMAND ...   to a Superdeck that is running:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: switcharoo [flags] FOLDER...\n       switcharoo version\n       switcharoo attach [ID]\n       switcharoo COMMAND ...   to a Switcharoo that is running:\n")
 		var lines []string
 		for _, l := range controlCommands {
 			lines = append(lines, "         "+l)
 		}
 		sort.Strings(lines)
 		fmt.Fprintf(flag.CommandLine.Output(), strings.Join(lines, "\n")+"\n\n"+
-			"Each FOLDER is a place Superdeck may launch Claude in, along with the\n"+
+			"Each FOLDER is a place Switcharoo may launch Claude in, along with the\n"+
 			"folders inside it. Glob patterns work too, for example ~/Projects/acme-*.\n\nflags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	roots, err := expandRoots(flag.Args())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "superdeck: %v\n\n", err)
+		fmt.Fprintf(os.Stderr, "switcharoo: %v\n\n", err)
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -153,26 +196,26 @@ func main() {
 		}
 		args = append(args, a.roots...)
 		path := filepath.Dir(a.claude) + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-		fmt.Print(launchAgent(self, args, filepath.Join(a.state, "superdeck.log"), path))
+		fmt.Print(launchAgent(self, args, filepath.Join(a.state, "switcharoo.log"), path))
 		return
 	}
-	// Everything Superdeck writes is for this user only.
+	// Everything Switcharoo writes is for this user only.
 	syscall.Umask(0o077)
 	if err := os.MkdirAll(filepath.Join(a.state, "accounts"), 0o700); err != nil {
 		log.Fatal(err)
 	}
 	os.Chmod(a.state, 0o700)
-	// Two Superdecks sharing one state directory would each restart and
+	// Two Switcharoos sharing one state directory would each restart and
 	// duplicate the other's instances. Only one may run.
 	lock, err := os.OpenFile(filepath.Join(a.state, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		log.Fatalf("another Superdeck is already running with %s", a.state)
+		log.Fatalf("another Switcharoo is already running with %s", a.state)
 	}
 	defer lock.Close()
-	// Open the data, upgrading its schema if this is a newer Superdeck.
+	// Open the data, upgrading its schema if this is a newer Switcharoo.
 	// Nothing is launched and nothing listens until that has succeeded.
 	if err := a.openData(); err != nil {
 		log.Fatal(err)
@@ -181,7 +224,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rotateLog(filepath.Join(a.state, "superdeck.log"))
+	rotateLog(filepath.Join(a.state, "switcharoo.log"))
 	srv := &http.Server{Addr: *addr, Handler: a.routes(),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 60 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
@@ -190,20 +233,20 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		// Claude processes are kept alive by their holders and carry on.
-		// Superdeck picks them up again when it next starts.
-		log.Print("superdeck stopping; instances keep running")
+		// Switcharoo picks them up again when it next starts.
+		log.Print("switcharoo stopping; instances keep running")
 		a.closing.Store(true)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
 	}()
-	log.Printf("superdeck on http://%s  claude=%s", *addr, a.claude)
+	log.Printf("switcharoo on http://%s  claude=%s", *addr, a.claude)
 	for _, root := range a.roots {
 		log.Printf("allowed folder: %s", root)
 	}
 	log.Print("no sign-in yet: anyone who can reach this address can use it")
 	// Claim the address before touching any process: if it is taken, this
-	// Superdeck must leave without having launched anything.
+	// Switcharoo must leave without having launched anything.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatal(err)
@@ -214,8 +257,14 @@ func main() {
 		log.Fatal(err)
 	}
 	a.serveControl()
+	// Every account gets the current skill now, not only when an instance
+	// next starts under it: a session opened in an instance that is already
+	// running reads whatever is there.
+	for _, acct := range a.accountList() {
+		a.installSkill(filepath.Join(a.state, "accounts", acct.ID))
+	}
 	go a.restore()
-	for _, f := range []string{"superdeck.log", "holders.log"} {
+	for _, f := range []string{"switcharoo.log", "holders.log"} {
 		os.Chmod(filepath.Join(a.state, f), 0o600)
 	}
 	go a.watchdog(*addr)
@@ -282,8 +331,8 @@ func (a *App) hostOK(h string) bool {
 	return net.ParseIP(host) != nil || a.selfNames[host]
 }
 
-// watchdog restarts Superdeck if it stops answering. launchd brings back a
-// Superdeck that crashed, but cannot see one that is running and stuck, and
+// watchdog restarts Switcharoo if it stops answering. launchd brings back a
+// Switcharoo that crashed, but cannot see one that is running and stuck, and
 // a stuck one cannot be fixed from a phone. Restarting is safe by design:
 // instances are kept alive by their holders and picked up again.
 //
@@ -321,7 +370,7 @@ func (a *App) watchdog(addr string) {
 		fails++
 		log.Printf("health check failed (%d of %d): %v", fails, watchdogFails, err)
 		if fails >= watchdogFails {
-			log.Print("superdeck has stopped answering; restarting it. Instances keep running. What it was doing:")
+			log.Print("switcharoo has stopped answering; restarting it. Instances keep running. What it was doing:")
 			pprof.Lookup("goroutine").WriteTo(log.Writer(), 1)
 			watchdogExit()
 			return
@@ -386,10 +435,10 @@ func (a *App) guard(next http.Handler) http.Handler {
 	})
 }
 
-// openData opens Superdeck's database, applying schema migrations, and
+// openData opens Switcharoo's database, applying schema migrations, and
 // brings in anything saved by versions that kept plain files.
 func (a *App) openData() error {
-	path := filepath.Join(a.state, "superdeck.db")
+	path := dataPath(a.state)
 	st, err := openStore(path)
 	if err != nil {
 		return err
@@ -540,7 +589,7 @@ func (a *App) folderList() []folder {
 	return a.folderLs
 }
 
-// offered reports whether dir is one of the folders Superdeck lists. Being
+// offered reports whether dir is one of the folders Switcharoo lists. Being
 // somewhere inside an allowed folder is not enough: hidden directories and
 // the insides of repositories are not places to run an instance.
 func (a *App) offered(dir string) bool {

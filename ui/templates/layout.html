@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110f">
 <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
-<title>{{.Title}} · Superdeck</title>
+<title>{{.Title}} · Switcharoo</title>
 <link rel="stylesheet" href="/static/app.css?v={{.V}}">
 <script src="/static/htmx.min.js?v={{.V}}" defer></script>
 </head>
 <body{{if .Wide}} class="wide"{{end}}>
 <header class="top">
-  <a class="mark" href="/">super<b>deck</b></a>
+  <a class="mark" href="/">switch<b>aroo</b></a>
   <nav>
     <a href="/"{{if eq .Nav "instances"}} aria-current="page"{{end}}>Instances</a>
     <a href="/accounts"{{if eq .Nav "accounts"}} aria-current="page"{{end}}>Accounts</a>

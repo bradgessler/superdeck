@@ -1,4 +1,4 @@
-module github.com/bradgessler/superdeck
+module github.com/bradgessler/switcharoo
 
 go 1.23.0
 

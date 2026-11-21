@@ -149,7 +149,7 @@ case "$1 $2" in
     fi
     if [ -f "$C/asks-other" ]; then printf "Share anonymous usage data? (y/n) "; read x; echo "answered=$x"; fi
     echo "serving $*"
-    echo "reach=$SUPERDECK_ACCOUNT|$SUPERDECK_FOLDER|$SUPERDECK_SOCK"
+    echo "reach=$SWITCHAROO_ACCOUNT|$SWITCHAROO_FOLDER|$SWITCHAROO_SOCK"
     echo "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_0123456789abcdefABCDEFxyz"
     echo "Or ask Claude to work in this folder"; sleep 600 ;;
   "update "*) echo "Claude Code is up to date" ;;
@@ -187,7 +187,7 @@ func init() {
 	consentEvery = 30 * time.Millisecond
 }
 
-// The test binary doubles as the holder: Superdeck starts holders by
+// The test binary doubles as the holder: Switcharoo starts holders by
 // re-running itself with "hold", and under `go test` "itself" is this binary.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "hold" {
@@ -398,7 +398,7 @@ func TestStartServerRejectsBadInput(t *testing.T) {
 	}
 }
 
-func TestInstancesComeBackAfterSuperdeckRestarts(t *testing.T) {
+func TestInstancesComeBackAfterSwitcharooRestarts(t *testing.T) {
 	a := testApp(t)
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	a.remember(wanted{"work", "/etc", "same-dir", 1}, true) // a tampered entry
@@ -669,7 +669,7 @@ func TestLaunchFlowInTheBrowser(t *testing.T) {
 }
 
 func TestLaunchAgentEscapesArguments(t *testing.T) {
-	out := launchAgent("/bin/superdeck", []string{"-root", "/Users/a&b/<Projects>"}, "/tmp/log", "/usr/bin")
+	out := launchAgent("/bin/switcharoo", []string{"-root", "/Users/a&b/<Projects>"}, "/tmp/log", "/usr/bin")
 	if !strings.Contains(out, "<string>/Users/a&amp;b/&lt;Projects&gt;</string>") || strings.Contains(out, "a&b") {
 		t.Errorf("arguments not escaped:\n%s", out)
 	}
@@ -711,7 +711,7 @@ func TestAbandonedSignInExpires(t *testing.T) {
 	}
 }
 
-func TestGarbageOutputCannotCrashSuperdeck(t *testing.T) {
+func TestGarbageOutputCannotCrashSwitcharoo(t *testing.T) {
 	m := testManager(t)
 	r := &Run{Kind: "server", Account: "a", dir: t.TempDir()}
 	junk := "head -c 300000 /dev/urandom; printf '\\033[999999;999999H\\033[9999999A\\033[?1049h\\033[2J\\033]0;'; head -c 5000 /dev/urandom; echo; echo '<script>alert(1)</script>'"
@@ -877,7 +877,7 @@ func TestMoveInstanceToAnotherAccount(t *testing.T) {
 // ---- storage ----
 
 func TestStoreMigratesOnOpenAndRefusesNewerData(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "superdeck.db")
+	path := filepath.Join(t.TempDir(), "switcharoo.db")
 	s, err := openStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -900,12 +900,12 @@ func TestStoreMigratesOnOpenAndRefusesNewerData(t *testing.T) {
 	if w, _ := s.Wanted(); len(w) != 1 || w[0].Spawn != "same-dir" || w[0].Capacity != 2 {
 		t.Errorf("saved instances after reopening: %+v", w)
 	}
-	// Data from a newer Superdeck must not be opened by an older one.
+	// Data from a newer Switcharoo must not be opened by an older one.
 	if _, err := s.db.Exec(`INSERT INTO goose_db_version (version_id, is_applied) VALUES (9999, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	s.db.Close()
-	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "newer Superdeck") {
+	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "newer Switcharoo") {
 		t.Errorf("opening newer data: %v", err)
 	}
 }
@@ -942,7 +942,7 @@ func TestOldFilesAreImportedOnce(t *testing.T) {
 	}
 }
 
-func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
+func TestInstancesKeepRunningWhileSwitcharooRestarts(t *testing.T) {
 	a := testApp(t)
 	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
 	if err != nil {
@@ -952,7 +952,7 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(run.Tail(), "serving") })
 	pid := run.Pid()
 
-	// Superdeck goes away without stopping anything, and a new one starts.
+	// Switcharoo goes away without stopping anything, and a new one starts.
 	a.closing.Store(true)
 	next := newApp(a.roots, a.state, a.claude)
 	next.adopt()
@@ -968,7 +968,7 @@ func TestInstancesKeepRunningWhileSuperdeckRestarts(t *testing.T) {
 	}
 	waitFor(t, func() bool { return strings.Contains(same.Tail(), "serving") && same.View().Link != "" })
 
-	// The new Superdeck is fully in charge of it: it can stop it.
+	// The new Switcharoo is fully in charge of it: it can stop it.
 	same.Stop()
 	waitFor(t, func() bool { return !same.alive() })
 	if live, _ := next.data().LiveRuns(); len(live) != 0 {
@@ -1211,7 +1211,7 @@ func TestDecliningTrustForgetsTheInstance(t *testing.T) {
 	waitFor(t, func() bool { return !run.alive() && !a.isWanted("work", in(a, "app")) })
 }
 
-func TestSecondSuperdeckOnTheSameDataIsHeldOff(t *testing.T) {
+func TestSecondSwitcharooOnTheSameDataIsHeldOff(t *testing.T) {
 	// The lock itself is taken in main; this checks the primitive behaves.
 	path := filepath.Join(t.TempDir(), "lock")
 	one, _ := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -1228,7 +1228,7 @@ func TestSecondSuperdeckOnTheSameDataIsHeldOff(t *testing.T) {
 
 func TestLeftoverFilesAreSweptAndUnknownHoldersStopped(t *testing.T) {
 	a := testApp(t)
-	// A holder Superdeck has no record of, as after a crash between starting
+	// A holder Switcharoo has no record of, as after a crash between starting
 	// a process and writing it down.
 	stray := &Run{Kind: "server", Account: "x", dir: t.TempDir()}
 	saved := a.mgr.onStart
@@ -1486,7 +1486,7 @@ func TestHolderWhoseSocketIsDeletedIsLeftRunningAndCanStillBeStopped(t *testing.
 	waitFor(t, func() bool { return !processAlive(pid) && !first.alive() })
 }
 
-func TestManyRestartsOfSuperdeckLeaveProcessesAlone(t *testing.T) {
+func TestManyRestartsOfSwitcharooLeaveProcessesAlone(t *testing.T) {
 	a := testApp(t)
 	a.remember(wanted{"work", in(a, "app"), "worktree", 4}, true)
 	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
@@ -1777,10 +1777,10 @@ func TestHolderIsOnlyDeadOnAClearNo(t *testing.T) {
 	}
 }
 
-// An instance that proved itself keeps that standing across a Superdeck
+// An instance that proved itself keeps that standing across a Switcharoo
 // restart and a move, so a bad start afterwards is retried, not forgotten.
 func TestAdoptedInstanceStillProvesItself(t *testing.T) {
-	minLife = time.Hour // the first Superdeck goes away before it is proven
+	minLife = time.Hour // the first Switcharoo goes away before it is proven
 	t.Cleanup(func() { minLife = 0 })
 	a := testApp(t)
 	run, err := a.startServer("work", in(a, "app"), "", 0, 0)

@@ -13,9 +13,9 @@ import (
 // ask runs the command a session would run, as that session.
 func ask(t *testing.T, a *App, r *Run, stdin string, cmd string, args ...string) (string, int) {
 	t.Helper()
-	t.Setenv("SUPERDECK_SOCK", a.controlSock())
-	t.Setenv("SUPERDECK_ACCOUNT", r.Account)
-	t.Setenv("SUPERDECK_FOLDER", r.Project)
+	t.Setenv("SWITCHAROO_SOCK", a.controlSock())
+	t.Setenv("SWITCHAROO_ACCOUNT", r.Account)
+	t.Setenv("SWITCHAROO_FOLDER", r.Project)
 	var out bytes.Buffer
 	code := controlMain(a.state, cmd, args, strings.NewReader(stdin), &out)
 	return out.String(), code
@@ -33,11 +33,11 @@ func TestASessionCanMoveItsInstanceAndLeaveNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.remember(wanted{run.Account, run.Project, run.spawn, run.capacity}, true)
-	// The instance is told how to reach Superdeck, and given the skill.
+	// The instance is told how to reach Switcharoo, and given the skill.
 	want := "reach=work|" + in(a, "app") + "|" + a.controlSock()
 	waitFor(t, func() bool { return strings.Contains(run.Tail(), want) })
-	skill, err := os.ReadFile(filepath.Join(a.state, "accounts", "work", "skills", "superdeck", "SKILL.md"))
-	if err != nil || !strings.Contains(string(skill), "name: superdeck") {
+	skill, err := os.ReadFile(filepath.Join(a.state, "accounts", "work", "skills", "switcharoo", "SKILL.md"))
+	if err != nil || !strings.Contains(string(skill), "name: switcharoo") {
 		t.Fatalf("the skill was not installed: %v", err)
 	}
 
@@ -95,11 +95,11 @@ func TestCommandsFromOutsideAnInstance(t *testing.T) {
 	if out, code := ask(t, a, nowhere, "", "status"); code != 0 || !strings.Contains(out, "Nothing is running") {
 		t.Errorf("status: %d %q", code, out)
 	}
-	// With no Superdeck to talk to, it says so.
-	t.Setenv("SUPERDECK_SOCK", filepath.Join(t.TempDir(), "none.sock"))
+	// With no Switcharoo to talk to, it says so.
+	t.Setenv("SWITCHAROO_SOCK", filepath.Join(t.TempDir(), "none.sock"))
 	var out bytes.Buffer
 	if controlMain(a.state, "status", nil, strings.NewReader(""), &out) == 0 || !strings.Contains(out.String(), "not answering") {
-		t.Errorf("no Superdeck: %q", out.String())
+		t.Errorf("no Switcharoo: %q", out.String())
 	}
 	// The socket is for the owner only, and survives the sweep at startup.
 	if st, err := os.Stat(a.controlSock()); err != nil || st.Mode().Perm() != 0o600 {
@@ -115,7 +115,7 @@ func TestCommandsFromOutsideAnInstance(t *testing.T) {
 
 // Everything the page's buttons do, less removing an account, can be asked
 // for in words: from Claude in a session, or from a terminal.
-func TestSuperdeckCanBeDrivenByCommands(t *testing.T) {
+func TestSwitcharooCanBeDrivenByCommands(t *testing.T) {
 	moveDelay, settleFor = 20*time.Millisecond, 3*time.Second
 	a := testApp(t)
 	a.serveControl()
@@ -149,7 +149,7 @@ func TestSuperdeckCanBeDrivenByCommands(t *testing.T) {
 	if w := a.loadWanted(); run == nil || len(w) != 1 {
 		t.Fatalf("launched instance not running or not remembered: %+v", w)
 	}
-	if out, _ := ask(t, a, me, "", "status"); !strings.Contains(out, "fresh: needs you, under work") || !strings.Contains(out, "superdeck answer "+run.ID+" yes") {
+	if out, _ := ask(t, a, me, "", "status"); !strings.Contains(out, "fresh: needs you, under work") || !strings.Contains(out, "switcharoo answer "+run.ID+" yes") {
 		t.Errorf("status while waiting: %q", out)
 	}
 	// The question is answered by name; an instance that is not asking is left alone.
@@ -193,7 +193,7 @@ func TestAnAccountCanBeAddedAndSignedInByCommands(t *testing.T) {
 		t.Errorf("a bad account name was taken: %q", out)
 	}
 	out, code := ask(t, a, me, "", "account", "add", "extra")
-	if code != 0 || !strings.Contains(out, "https://claude.ai/oauth/authorize") || !strings.Contains(out, "superdeck code extra CODE") {
+	if code != 0 || !strings.Contains(out, "https://claude.ai/oauth/authorize") || !strings.Contains(out, "switcharoo code extra CODE") {
 		t.Fatalf("account add: %d %q", code, out)
 	}
 	if out, _ := ask(t, a, me, "", "status"); !strings.Contains(out, "Sign-in waiting for extra") {
@@ -227,7 +227,7 @@ func TestARepositoryWithNoCommitsIsSaidToNeedOne(t *testing.T) {
 	a := testApp(t)
 	a.serveControl()
 
-	// A folder Superdeck makes starts with a commit.
+	// A folder Switcharoo makes starts with a commit.
 	made, err := createProject(a.roots[0], "fresh")
 	if err != nil {
 		t.Fatal(err)
@@ -278,10 +278,10 @@ func TestARepositoryWithNoCommitsIsSaidToNeedOne(t *testing.T) {
 	}
 }
 
-// Two Superdecks opening the same new or old database at once both tried to
+// Two Switcharoos opening the same new or old database at once both tried to
 // apply the first migration, and one refused to start.
 func TestOpeningTheDatabaseTwiceAtOnceUpgradesItOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "superdeck.db")
+	path := filepath.Join(t.TempDir(), "switcharoo.db")
 	errs := make(chan error, 8)
 	for i := 0; i < cap(errs); i++ {
 		go func() {
@@ -329,7 +329,7 @@ func TestLaunchingUnderAnotherLoginSaysToSwitch(t *testing.T) {
 	}
 }
 
-// Launching through Superdeck is asking for Remote Control, so the question
+// Launching through Switcharoo is asking for Remote Control, so the question
 // Claude asks once per account about turning it on is answered yes without
 // troubling anyone. Whether to trust a folder is still the owner's to answer.
 func TestRemoteControlIsTurnedOnWithoutAsking(t *testing.T) {
@@ -352,5 +352,55 @@ func TestRemoteControlIsTurnedOnWithoutAsking(t *testing.T) {
 	waitFor(t, func() bool { return run.View().Link != "" })
 	if !strings.Contains(run.Tail(), "consented=y") {
 		t.Errorf("Remote Control was not turned on: %s", run.Tail())
+	}
+}
+
+// Switcharoo was called Superdeck. A Mac set up under the old name must carry
+// on exactly where it was: its accounts cannot move, and its instances were
+// started knowing only the old names.
+func TestAMacSetUpUnderTheOldNameCarriesOn(t *testing.T) {
+	home := t.TempDir()
+	if got := defaultState(home); got != filepath.Join(home, ".switcharoo") {
+		t.Errorf("a new install: %s", got)
+	}
+	os.Mkdir(filepath.Join(home, ".superdeck"), 0o700)
+	if got := defaultState(home); got != filepath.Join(home, ".superdeck") {
+		t.Errorf("an old install: %s", got)
+	}
+	os.Mkdir(filepath.Join(home, ".switcharoo"), 0o700)
+	if got := defaultState(home); got != filepath.Join(home, ".switcharoo") {
+		t.Errorf("both: %s", got)
+	}
+
+	state := filepath.Join(home, ".superdeck")
+	if got := dataPath(state); got != filepath.Join(state, "switcharoo.db") {
+		t.Errorf("new data: %s", got)
+	}
+	os.WriteFile(filepath.Join(state, "superdeck.db"), nil, 0o600)
+	if got := dataPath(state); got != filepath.Join(state, "superdeck.db") {
+		t.Errorf("old data: %s", got)
+	}
+
+	// An instance started before the rename still reaches it, and the old
+	// skill is replaced, not kept beside the new one.
+	a := testApp(t)
+	a.serveControl()
+	old := filepath.Join(a.state, "accounts", "work", "skills", "superdeck")
+	os.MkdirAll(old, 0o700)
+	os.WriteFile(filepath.Join(old, "SKILL.md"), []byte("old"), 0o600)
+	run, err := a.startServer("work", in(a, "app"), "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("the old skill is still there: %v", err)
+	}
+	for k, v := range map[string]string{"_SOCK": a.controlSock(), "_ACCOUNT": run.Account, "_FOLDER": run.Project} {
+		t.Setenv("SWITCHAROO"+k, "")
+		t.Setenv("SUPERDECK"+k, v)
+	}
+	var out bytes.Buffer
+	if code := controlMain(a.state, "status", nil, strings.NewReader(""), &out); code != 0 || !strings.Contains(out.String(), "this session") {
+		t.Errorf("status from an instance that knows the old names: %d %q", code, out.String())
 	}
 }

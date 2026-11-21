@@ -1,14 +1,14 @@
 package main
 
 // A holder is a small process that keeps one Claude process alive on a
-// pseudo-terminal, independent of Superdeck. Superdeck starts it by running
-// its own binary as `superdeck hold ...`, detached, and talks to it over a
-// Unix socket. When Superdeck restarts, the holder and Claude carry on, and
-// the new Superdeck reconnects.
+// pseudo-terminal, independent of Switcharoo. Switcharoo starts it by running
+// its own binary as `switcharoo hold ...`, detached, and talks to it over a
+// Unix socket. When Switcharoo restarts, the holder and Claude carry on, and
+// the new Switcharoo reconnects.
 //
 // The holder is deliberately dumb. It does not interpret what Claude prints;
 // it keeps the last part of the raw output in memory and hands it over on
-// request. Everything that could go wrong with parsing happens in Superdeck,
+// request. Everything that could go wrong with parsing happens in Switcharoo,
 // where a failure cannot take Claude down.
 //
 // Rules for changing this file:
@@ -16,7 +16,7 @@ package main
 //   - Nothing a client does may stall the holder. No write to a client
 //     happens while h.mu is held, and every client has a deadline or a
 //     bounded queue.
-//   - Holders outlive Superdeck, so a new Superdeck must understand holders
+//   - Holders outlive Switcharoo, so a new Switcharoo must understand holders
 //     started by an older one. Add verbs and reply fields; never change the
 //     meaning of existing ones. holdProtocol says which a holder speaks.
 
@@ -60,7 +60,7 @@ type holdReply struct {
 	N     int   `json:"n"`     // how many raw bytes follow
 }
 
-// holdExit is written beside the socket when the process ends, so Superdeck
+// holdExit is written beside the socket when the process ends, so Switcharoo
 // can learn how it ended even after the holder has gone.
 type holdExit struct {
 	Code int `json:"code"`
@@ -85,7 +85,7 @@ type holder struct {
 	streams map[*stream]struct{}
 }
 
-// holdMain is the entry point for `superdeck hold`. It is not for people.
+// holdMain is the entry point for `switcharoo hold`. It is not for people.
 func holdMain(args []string) (status int) {
 	fs := flag.NewFlagSet("hold", flag.ContinueOnError)
 	sock := fs.String("socket", "", "")
@@ -94,7 +94,7 @@ func holdMain(args []string) (status int) {
 	cols := fs.Int("cols", 200, "")
 	rows := fs.Int("rows", 50, "")
 	if err := fs.Parse(args); err != nil || *sock == "" || fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "superdeck hold is used by Superdeck itself")
+		fmt.Fprintln(os.Stderr, "switcharoo hold is used by Switcharoo itself")
 		return 2
 	}
 	// A holder's own failures must leave a trace somewhere.
@@ -134,7 +134,7 @@ func holdMain(args []string) (status int) {
 	argv := fs.Args()
 	h.cmd = exec.Command(argv[0], argv[1:]...)
 	h.cmd.Dir = *dir
-	h.cmd.Env = os.Environ() // Superdeck starts the holder with exactly the environment the process should have
+	h.cmd.Env = os.Environ() // Switcharoo starts the holder with exactly the environment the process should have
 	h.tty, err = pty.StartWithSize(h.cmd, &pty.Winsize{Cols: uint16(*cols), Rows: uint16(*rows)})
 	if err != nil {
 		// Say why in the output, so the failure is visible where output is shown.
@@ -221,7 +221,7 @@ func (h *holder) write(b []byte) {
 // finish records how the process ended: its output and exit code are written
 // beside the socket before the holder goes away. The output is written first,
 // so an exit record always has its output with it. Only once both are on disk
-// does the holder say the process has ended: Superdeck clears the files away
+// does the holder say the process has ended: Switcharoo clears the files away
 // when it hears that, and must not do so before they exist.
 func (h *holder) finish(sock string, code int) {
 	h.mu.Lock()
@@ -248,7 +248,7 @@ func writeFileAtomic(path string, b []byte) {
 }
 
 // stop asks the process group to exit and kills it if it lingers. The holder
-// does the waiting itself, so a stop completes even if Superdeck goes away.
+// does the waiting itself, so a stop completes even if Switcharoo goes away.
 func (h *holder) stop() {
 	if h.cmd == nil || h.cmd.Process == nil {
 		return
@@ -283,7 +283,7 @@ func (h *holder) serve(ln net.Listener, say func(string, ...any)) {
 				return
 			}
 			// Running out of file descriptors, say, must not end the service:
-			// Superdeck would take the silence for a dead holder.
+			// Switcharoo would take the silence for a dead holder.
 			say("accept: %v", err)
 			time.Sleep(200 * time.Millisecond)
 			continue
@@ -297,7 +297,7 @@ func (h *holder) serve(ln net.Listener, say func(string, ...any)) {
 //	snap <since>   the output printed after byte <since>, with the process's state
 //	in <base64>    bytes to type into the process
 //	stop           end the process
-//	attach         a live two-way stream, for `superdeck attach`
+//	attach         a live two-way stream, for `switcharoo attach`
 func (h *holder) handle(c net.Conn) {
 	defer func() { recover() }()
 	defer c.Close()
@@ -396,7 +396,7 @@ func (h *holder) handle(c net.Conn) {
 	}
 }
 
-// ---- the client side, used by Superdeck ----
+// ---- the client side, used by Switcharoo ----
 
 // holdGone reports whether an error from talking to a holder means the holder
 // is definitely not there (nothing is listening on its socket), as opposed to
@@ -455,12 +455,12 @@ func holdSay(sock, line string) error {
 	return nil
 }
 
-// attachMain is `superdeck attach [-state DIR] [ID]`: it connects this
+// attachMain is `switcharoo attach [-state DIR] [ID]`: it connects this
 // terminal to a running process, for looking at it or typing into it from the
 // Mac itself.
 func attachMain(defaultState string, args []string) int {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
-	state := fs.String("state", defaultState, "Superdeck's state directory")
+	state := fs.String("state", defaultState, "Switcharoo's state directory")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -477,7 +477,7 @@ func attachMain(defaultState string, args []string) int {
 			fmt.Println("Nothing is running.")
 			return 0
 		}
-		fmt.Println("Running processes. Attach with: superdeck attach ID")
+		fmt.Println("Running processes. Attach with: switcharoo attach ID")
 		for _, id := range live {
 			fmt.Println("  " + id)
 		}
@@ -486,7 +486,7 @@ func attachMain(defaultState string, args []string) int {
 	id := filepath.Base(fs.Arg(0))
 	c, err := net.DialTimeout("unix", filepath.Join(dir, id+".sock"), 2*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "superdeck: nothing is running with id %s\n", id)
+		fmt.Fprintf(os.Stderr, "switcharoo: nothing is running with id %s\n", id)
 		return 1
 	}
 	defer c.Close()

@@ -11,7 +11,7 @@ import (
 )
 
 // wanted is an instance a person launched and has not stopped. The list is
-// saved so that Superdeck brings the same instances back after it restarts,
+// saved so that Switcharoo brings the same instances back after it restarts,
 // for example when the Mac reboots.
 type wanted struct {
 	Account  string `json:"account"`
@@ -94,7 +94,7 @@ func (a *App) restore() {
 	}
 }
 
-// launchAgent returns a launchd property list that starts Superdeck at login
+// launchAgent returns a launchd property list that starts Switcharoo at login
 // with the given arguments and restarts it if it exits.
 func launchAgent(binary string, args []string, logPath, path string) string {
 	esc := func(s string) string {
@@ -111,7 +111,7 @@ func launchAgent(binary string, args []string, logPath, path string) string {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.github.bradgessler.superdeck</string>
+  <string>com.github.bradgessler.switcharoo</string>
   <key>ProgramArguments</key>
   <array>%s
   </array>

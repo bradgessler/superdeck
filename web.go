@@ -207,7 +207,7 @@ type accountView struct {
 }
 
 func (a *App) accountViews(selected string) []accountView {
-	// Just after Superdeck starts nothing is known about who is signed in.
+	// Just after Switcharoo starts nothing is known about who is signed in.
 	// A check takes a fraction of a second, so give them a moment rather
 	// than show every account as unknown.
 	for deadline := time.Now().Add(1200 * time.Millisecond); time.Now().Before(deadline); time.Sleep(40 * time.Millisecond) {
@@ -288,7 +288,7 @@ func (a *App) instance(v RunView) instanceView {
 		iv.Lede = "Claude is asking whether to trust this folder before it works here. Only trust folders whose contents you know."
 	case v.Hint == "needs-consent" && !v.Done:
 		iv.State, iv.Cls, iv.Do = "needs you", "wait", "consent"
-		iv.Lede = "Claude is asking to turn on Remote Control for " + name + ". It asks once per account, and it is what lets the Claude app reach instances on this Mac. Superdeck normally says yes for you; if this is still here, answer it below."
+		iv.Lede = "Claude is asking to turn on Remote Control for " + name + ". It asks once per account, and it is what lets the Claude app reach instances on this Mac. Switcharoo normally says yes for you; if this is still here, answer it below."
 	case v.Hint == "needs-answer":
 		iv.State, iv.Cls, iv.Do, iv.Question = "needs you", "wait", "question", v.Question
 		iv.Lede = "Claude is asking a question."
@@ -296,7 +296,7 @@ func (a *App) instance(v RunView) instanceView {
 	// ---- running ----
 	case v.Lost:
 		iv.State, iv.Cls = "not responding", "wait"
-		iv.Lede = "Superdeck cannot reach this instance at the moment. It has been left alone and may well still be running; this clears by itself if it answers again."
+		iv.Lede = "Switcharoo cannot reach this instance at the moment. It has been left alone and may well still be running; this clears by itself if it answers again."
 	case !v.Done && iv.IsLogin:
 		iv.State, iv.Cls = "waiting for you", "wait"
 		if v.URL == "" && time.Since(v.Started) > 15*time.Second {
@@ -325,10 +325,10 @@ func (a *App) instance(v RunView) instanceView {
 		iv.Lede = "This one ended and was started again."
 	case !v.RestartAt.IsZero() && v.Hint == "needs-login":
 		iv.State, iv.Cls, iv.Restarting = "restarting", "wait", true
-		iv.Lede = "Claude said " + name + " is signed out. Just after Superdeck starts that can be wrong, so it is trying again."
+		iv.Lede = "Claude said " + name + " is signed out. Just after Switcharoo starts that can be wrong, so it is trying again."
 	case !v.RestartAt.IsZero():
 		iv.State, iv.Cls, iv.Restarting = "restarting", "wait", true
-		iv.Lede = "It stopped unexpectedly. Superdeck is starting it again."
+		iv.Lede = "It stopped unexpectedly. Switcharoo is starting it again."
 
 	// ---- ended ----
 	case v.Hint == "needs-trust":

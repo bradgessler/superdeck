@@ -1,12 +1,12 @@
 package main
 
-// The way a Claude session reaches Superdeck. Every instance is started with
-// the path of this binary in SUPERDECK and a skill that explains two things a
+// The way a Claude session reaches Switcharoo. Every instance is started with
+// the path of this binary in SWITCHAROO and a skill that explains two things a
 // session can do with it: move itself to another account, and read the notes
 // the session before it left.
 //
-// The session runs `superdeck move NAME`, which talks to the running
-// Superdeck over a Unix socket in its private run directory. Nothing is
+// The session runs `switcharoo move NAME`, which talks to the running
+// Switcharoo over a Unix socket in its private run directory. Nothing is
 // registered in Claude's settings, there is no extra server process, and the
 // socket is closed to other users of the Mac by the directory it is in. A
 // process that can reach it is already running as the owner.
@@ -41,55 +41,61 @@ var skillFS embed.FS
 
 const maxNotes = 64 << 10
 
-// moveDelay is how long after agreeing to a move Superdeck waits before
+// moveDelay is how long after agreeing to a move Switcharoo waits before
 // stopping the instance, so the session that asked can hear the answer.
 var moveDelay = 5 * time.Second
 
 func (a *App) controlSock() string { return filepath.Join(a.mgr.dir, "control.sock") }
 
 // sessionEnv is what an instance is given so that sessions inside it can
-// reach Superdeck. It names things; it carries no secret.
+// reach Switcharoo. It names things; it carries no secret.
 func (a *App) sessionEnv(accountID, dir string) []string {
 	return []string{
-		"SUPERDECK=" + a.mgr.self,
-		"SUPERDECK_SOCK=" + a.controlSock(),
-		"SUPERDECK_ACCOUNT=" + accountID,
-		"SUPERDECK_FOLDER=" + dir,
+		"SWITCHAROO=" + a.mgr.self,
+		"SWITCHAROO_SOCK=" + a.controlSock(),
+		"SWITCHAROO_ACCOUNT=" + accountID,
+		"SWITCHAROO_FOLDER=" + dir,
 	}
 }
 
-// installSkill puts Superdeck's skill into an account's config directory, in
-// a folder of its own. It is the one thing Superdeck writes there. Failing to
+// installSkill puts Switcharoo's skill into an account's config directory, in
+// a folder of its own. It is the one thing Switcharoo writes there. Failing to
 // is not a reason to refuse a launch.
 func (a *App) installSkill(configDir string) {
 	want, err := skillFS.ReadFile("skill/SKILL.md")
 	if err != nil {
 		return
 	}
-	dir := filepath.Join(configDir, "skills", "superdeck")
+	dir := filepath.Join(configDir, "skills", "switcharoo")
 	path := filepath.Join(dir, "SKILL.md")
 	if have, err := os.ReadFile(path); err == nil && string(have) == string(want) {
 		return
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		log.Printf("installing the Superdeck skill: %v", err)
+		log.Printf("installing the Switcharoo skill: %v", err)
 		return
 	}
 	writeFileAtomic(path, want)
+	// The skill had another name once. Two skills for one program would have
+	// Claude reading both, so the old one goes: the file is Switcharoo's own,
+	// and the folder is removed only if that leaves it empty.
+	old := filepath.Join(configDir, "skills", "superdeck")
+	os.Remove(filepath.Join(old, "SKILL.md"))
+	os.Remove(old)
 }
 
-// serveControl starts answering sessions. If it cannot, Superdeck carries on
+// serveControl starts answering sessions. If it cannot, Switcharoo carries on
 // without it: launching and supervising do not depend on this.
 func (a *App) serveControl() {
 	if err := ensureRunDir(a.mgr.dir); err != nil {
-		log.Printf("sessions cannot reach Superdeck: %v", err)
+		log.Printf("sessions cannot reach Switcharoo: %v", err)
 		return
 	}
 	path := a.controlSock()
-	os.Remove(path) // only one Superdeck runs on this data, so a socket here is stale
+	os.Remove(path) // only one Switcharoo runs on this data, so a socket here is stale
 	ln, err := net.Listen("unix", path)
 	if err != nil {
-		log.Printf("sessions cannot reach Superdeck: %v", err)
+		log.Printf("sessions cannot reach Switcharoo: %v", err)
 		return
 	}
 	os.Chmod(path, 0o600)
@@ -162,7 +168,7 @@ func (c ctl) which() (*Run, string) {
 		if run := c.a.callerInstance(c.get("account"), c.get("folder")); run != nil {
 			return run, ""
 		}
-		return nil, "Say which instance: its name or id, as `superdeck status` lists them."
+		return nil, "Say which instance: its name or id, as `switcharoo status` lists them."
 	}
 	var found []*Run
 	for _, v := range c.a.mgr.List() {
@@ -177,9 +183,9 @@ func (c ctl) which() (*Run, string) {
 	case 1:
 		return found[0], ""
 	case 0:
-		return nil, fmt.Sprintf("No instance called %q is running. `superdeck status` lists them.", ref)
+		return nil, fmt.Sprintf("No instance called %q is running. `switcharoo status` lists them.", ref)
 	}
-	return nil, fmt.Sprintf("More than one instance matches %q. Use the id from `superdeck status`.", ref)
+	return nil, fmt.Sprintf("More than one instance matches %q. Use the id from `switcharoo status`.", ref)
 }
 
 // own reports whether run is the instance the caller is running in. Stopping
@@ -211,7 +217,7 @@ func (c ctl) ctlAccountID(field string) (string, string) {
 	if id := c.a.accountID(want); id != "" {
 		return id, ""
 	}
-	return "", fmt.Sprintf("There is no account called %q. `superdeck accounts` lists them.", want)
+	return "", fmt.Sprintf("There is no account called %q. `switcharoo accounts` lists them.", want)
 }
 
 func (a *App) ctlStatus(c ctl) (int, string) {
@@ -227,11 +233,11 @@ func (a *App) ctlStatus(c ctl) (int, string) {
 			fmt.Fprintf(&b, "%s: %s, under %s, in %s (id %s)%s\n", iv.Title, iv.State, iv.Account, iv.Path, v.ID, mark)
 			switch iv.Do {
 			case "trust":
-				fmt.Fprintf(&b, "    Claude is asking whether to trust this folder. Answer with: superdeck answer %s yes   (or no)\n", v.ID)
+				fmt.Fprintf(&b, "    Claude is asking whether to trust this folder. Answer with: switcharoo answer %s yes   (or no)\n", v.ID)
 			case "consent":
-				fmt.Fprintf(&b, "    Claude is asking whether to turn on Remote Control for this account. Answer with: superdeck answer %s yes   (or no)\n", v.ID)
+				fmt.Fprintf(&b, "    Claude is asking whether to turn on Remote Control for this account. Answer with: switcharoo answer %s yes   (or no)\n", v.ID)
 			case "question":
-				fmt.Fprintf(&b, "    Claude is asking: %s\n    Answer with: superdeck answer %s yes   (or no)\n", strings.TrimSpace(iv.Question), v.ID)
+				fmt.Fprintf(&b, "    Claude is asking: %s\n    Answer with: switcharoo answer %s yes   (or no)\n", strings.TrimSpace(iv.Question), v.ID)
 			case "open":
 				if noCommits(v.Project) {
 					fmt.Fprintf(&b, "    Sessions cannot start here yet: this repository has no commits. Make a first commit in it.\n")
@@ -241,7 +247,7 @@ func (a *App) ctlStatus(c ctl) (int, string) {
 		case v.Kind == "login" && !v.Done:
 			fmt.Fprintf(&b, "Sign-in waiting for %s.", iv.Account)
 			if v.URL != "" {
-				fmt.Fprintf(&b, " Open %s and then run: superdeck code %s CODE", v.URL, iv.Account)
+				fmt.Fprintf(&b, " Open %s and then run: switcharoo code %s CODE", v.URL, iv.Account)
 			}
 			b.WriteString("\n")
 		}
@@ -270,7 +276,7 @@ func (a *App) ctlAccounts(c ctl) (int, string) {
 		fmt.Fprintf(&b, "%s  (%s)%s\n", ac.Name, state, mark)
 	}
 	if b.Len() == 0 {
-		return 200, "There are no accounts yet. Add one with: superdeck account add NAME"
+		return 200, "There are no accounts yet. Add one with: switcharoo account add NAME"
 	}
 	return 200, b.String()
 }
@@ -284,23 +290,23 @@ func (a *App) ctlFolders(c ctl) (int, string) {
 			continue
 		}
 		if n++; n > 200 {
-			b.WriteString("... and more. Narrow it down: superdeck folders WORD\n")
+			b.WriteString("... and more. Narrow it down: switcharoo folders WORD\n")
 			break
 		}
 		b.WriteString(tilde(f.Path) + "\n")
 	}
 	if n == 0 {
-		return 200, "No folders match. New ones can be made with: superdeck folder NAME"
+		return 200, "No folders match. New ones can be made with: switcharoo folder NAME"
 	}
 	return 200, b.String()
 }
 
-// folderNamed finds a folder Superdeck offers from what a person would say:
+// folderNamed finds a folder Switcharoo offers from what a person would say:
 // its path, with or without ~, or just its name if only one has it.
 func (a *App) folderNamed(want string) (string, string) {
 	want = strings.TrimSpace(want)
 	if want == "" {
-		return "", "Say which folder. `superdeck folders` lists them."
+		return "", "Say which folder. `switcharoo folders` lists them."
 	}
 	var byName []string
 	for _, f := range a.folderList() {
@@ -318,7 +324,7 @@ func (a *App) folderNamed(want string) (string, string) {
 		if filepath.IsAbs(want) {
 			return want, "" // launch checks it properly and says why not
 		}
-		return "", fmt.Sprintf("No folder called %q is offered. `superdeck folders` lists them.", want)
+		return "", fmt.Sprintf("No folder called %q is offered. `switcharoo folders` lists them.", want)
 	}
 	for i, p := range byName {
 		byName[i] = tilde(p)
@@ -378,17 +384,17 @@ func (c ctl) settle(run *Run) string {
 	iv := a.instance(v)
 	switch {
 	case iv.Do == "trust":
-		return fmt.Sprintf("Claude is asking whether to trust the folder %s. Ask the user, then answer with: superdeck answer %s yes   (or no)", iv.Path, v.ID)
+		return fmt.Sprintf("Claude is asking whether to trust the folder %s. Ask the user, then answer with: switcharoo answer %s yes   (or no)", iv.Path, v.ID)
 	case iv.Do == "consent":
-		return fmt.Sprintf("Claude is asking whether to turn on Remote Control for this account. Ask the user, then answer with: superdeck answer %s yes   (or no)", v.ID)
+		return fmt.Sprintf("Claude is asking whether to turn on Remote Control for this account. Ask the user, then answer with: switcharoo answer %s yes   (or no)", v.ID)
 	case iv.Do == "question":
-		return fmt.Sprintf("Claude is asking: %s\nAsk the user, then answer with: superdeck answer %s yes   (or no)", strings.TrimSpace(iv.Question), v.ID)
+		return fmt.Sprintf("Claude is asking: %s\nAsk the user, then answer with: switcharoo answer %s yes   (or no)", strings.TrimSpace(iv.Question), v.ID)
 	case v.Link != "":
 		return "It is connected. In the Claude app it is under Code, or at " + v.Link + c.appLogin(v.Account)
 	case v.Done:
 		return "It stopped straight away: " + strings.TrimSpace(iv.Lede+" "+iv.Detail)
 	}
-	return "It is starting. `superdeck status` shows how it is doing."
+	return "It is starting. `switcharoo status` shows how it is doing."
 }
 
 var settleFor = 12 * time.Second
@@ -426,7 +432,7 @@ func (a *App) ctlNewFolder(c ctl) (int, string) {
 		for _, r := range a.roots {
 			opts = append(opts, tilde(r))
 		}
-		return no("Say where to make it: superdeck folder NAME WHERE, with WHERE one of: %s.", strings.Join(opts, ", "))
+		return no("Say where to make it: switcharoo folder NAME WHERE, with WHERE one of: %s.", strings.Join(opts, ", "))
 	}
 	if !a.allow() {
 		return no("Too many requests in a short time; wait a minute.")
@@ -438,7 +444,7 @@ func (a *App) ctlNewFolder(c ctl) (int, string) {
 	a.folderMu.Lock()
 	a.folderLs = nil
 	a.folderMu.Unlock()
-	return 200, fmt.Sprintf("Made %s, an empty Git repository. Launch Claude in it with: superdeck launch ACCOUNT %s", tilde(dir), tilde(dir))
+	return 200, fmt.Sprintf("Made %s, an empty Git repository. Launch Claude in it with: switcharoo launch ACCOUNT %s", tilde(dir), tilde(dir))
 }
 
 // later runs something that will end the session that asked for it, after
@@ -532,7 +538,7 @@ func (a *App) ctlMove(c ctl) (int, string) {
 	if notes != "" {
 		kept = "Your notes are saved for the next session."
 	}
-	return 200, fmt.Sprintf("Moving %s to %s.%s %s\nThe user should start a new session for this folder in the Claude app and ask it to pick up where this left off. If that account has not worked in this folder before, Claude will first ask whether to trust it; `superdeck status` shows the question.%s", filepath.Base(run.Project), name, note, kept, c.appLogin(to))
+	return 200, fmt.Sprintf("Moving %s to %s.%s %s\nThe user should start a new session for this folder in the Claude app and ask it to pick up where this left off. If that account has not worked in this folder before, Claude will first ask whether to trust it; `switcharoo status` shows the question.%s", filepath.Base(run.Project), name, note, kept, c.appLogin(to))
 }
 
 func (a *App) ctlAnswer(c ctl) (int, string) {
@@ -608,10 +614,10 @@ func (a *App) signIn(id string) (int, string) {
 	}
 	link := run.View().URL
 	if link == "" {
-		return 500, "The sign-in started but gave no address to open. `superdeck status` may show it in a moment."
+		return 500, "The sign-in started but gave no address to open. `switcharoo status` may show it in a moment."
 	}
 	name := a.accountName(id)
-	return 200, fmt.Sprintf("To sign %s in, the user opens this address in a browser where they are signed in to the Claude account they want it to use (a private window, if their browser is signed in to a different one):\n\n%s\n\nThe page shows a code. When they give it to you, run: superdeck code %s CODE\nThe sign-in waits 15 minutes.", name, link, name)
+	return 200, fmt.Sprintf("To sign %s in, the user opens this address in a browser where they are signed in to the Claude account they want it to use (a private window, if their browser is signed in to a different one):\n\n%s\n\nThe page shows a code. When they give it to you, run: switcharoo code %s CODE\nThe sign-in waits 15 minutes.", name, link, name)
 }
 
 func (a *App) ctlCode(c ctl) (int, string) {
@@ -621,7 +627,7 @@ func (a *App) ctlCode(c ctl) (int, string) {
 	}
 	run := a.pendingLogin(id)
 	if run == nil {
-		return no("No sign-in is waiting for %s. Start one with: superdeck signin %s.", a.accountName(id), a.accountName(id))
+		return no("No sign-in is waiting for %s. Start one with: switcharoo signin %s.", a.accountName(id), a.accountName(id))
 	}
 	if err := submitCode(run, c.get("code")); err != nil {
 		return no("%v.", err)
@@ -639,9 +645,9 @@ func (a *App) ctlCode(c ctl) (int, string) {
 		}
 		return 200, fmt.Sprintf("%s is signed in%s.", a.accountName(id), who)
 	case v.Done:
-		return 400, fmt.Sprintf("The sign-in did not work: the code was wrong or had expired. Start again with: superdeck signin %s", a.accountName(id))
+		return 400, fmt.Sprintf("The sign-in did not work: the code was wrong or had expired. Start again with: switcharoo signin %s", a.accountName(id))
 	}
-	return 200, "The code was entered; the sign-in has not finished yet. `superdeck accounts` will show when it has."
+	return 200, "The code was entered; the sign-in has not finished yet. `switcharoo accounts` will show when it has."
 }
 
 func (a *App) ctlHandoff(c ctl) (int, string) {
@@ -679,8 +685,8 @@ func (a *App) saveHandoff(folder, from, cwd, notes string) error {
 
 // ---- the command a session runs ----
 
-// controlCommands are the words that make `superdeck WORD ...` a command to
-// the running Superdeck and not a folder to serve.
+// controlCommands are the words that make `switcharoo WORD ...` a command to
+// the running Switcharoo and not a folder to serve.
 var controlCommands = map[string]string{
 	"status":   "status                      what is running, and anything waiting on a person",
 	"accounts": "accounts                    the accounts and whether each is signed in",
@@ -701,11 +707,18 @@ var controlCommands = map[string]string{
 // instance, where the environment says which instance that is; a person can
 // run the same ones in a terminal on the Mac.
 func controlMain(defaultState, cmd string, args []string, stdin io.Reader, out io.Writer) int {
-	sock := os.Getenv("SUPERDECK_SOCK")
+	// An instance started before the rename knows these by their old names.
+	env := func(k string) string {
+		if v := os.Getenv("SWITCHAROO" + k); v != "" {
+			return v
+		}
+		return os.Getenv("SUPERDECK" + k)
+	}
+	sock := env("_SOCK")
 	if sock == "" {
 		sock = filepath.Join(runDir(defaultState), "control.sock")
 	}
-	who := url.Values{"account": {os.Getenv("SUPERDECK_ACCOUNT")}, "folder": {os.Getenv("SUPERDECK_FOLDER")}}
+	who := url.Values{"account": {env("_ACCOUNT")}, "folder": {env("_FOLDER")}}
 	arg := func(i int) string {
 		if i < len(args) {
 			return args[i]
@@ -713,7 +726,7 @@ func controlMain(defaultState, cmd string, args []string, stdin io.Reader, out i
 		return ""
 	}
 	usage := func() int {
-		fmt.Fprintln(out, "usage: superdeck "+strings.Join(strings.Fields(controlCommands[cmd]), " "))
+		fmt.Fprintln(out, "usage: switcharoo "+strings.Join(strings.Fields(controlCommands[cmd]), " "))
 		return 2
 	}
 	method, path := "POST", "/"+cmd
@@ -786,12 +799,12 @@ func controlMain(defaultState, cmd string, args []string, stdin io.Reader, out i
 	var resp *http.Response
 	var err error
 	if method == "GET" {
-		resp, err = client.Get("http://superdeck" + path + "?" + who.Encode())
+		resp, err = client.Get("http://switcharoo" + path + "?" + who.Encode())
 	} else {
-		resp, err = client.PostForm("http://superdeck"+path, who)
+		resp, err = client.PostForm("http://switcharoo"+path, who)
 	}
 	if err != nil {
-		fmt.Fprintln(out, "Superdeck is not answering. It may be restarting (try again in a few seconds), or not running on this Mac.")
+		fmt.Fprintln(out, "Switcharoo is not answering. It may be restarting (try again in a few seconds), or not running on this Mac.")
 		return 1
 	}
 	defer resp.Body.Close()

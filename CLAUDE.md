@@ -1,6 +1,6 @@
-# Superdeck
+# Switcharoo
 
-Superdeck is a small web application, one Go binary, that launches Anthropic's `claude remote-control` on a Mac under one of several Claude accounts. You pick an account and a folder; the conversation itself happens in the official Claude app. Superdeck is a launcher and supervisor. It is not a chat client and must not become one.
+Switcharoo is a small web application, one Go binary, that launches Anthropic's `claude remote-control` on a Mac under one of several Claude accounts. You pick an account and a folder; the conversation itself happens in the official Claude app. Switcharoo is a launcher and supervisor. It is not a chat client and must not become one.
 
 Read the README for what it does and its security model. This file is how to work on it.
 
@@ -8,11 +8,11 @@ Read the README for what it does and its security model. This file is how to wor
 
 These came from the person who owns this project. Treat them as requirements.
 
-1. **Render on the server.** Go templates produce every screen. The browser runs as little as possible. See the `superdeck-browser-code` skill before adding any script.
-2. **One job per screen, and less on it.** See the `superdeck-ui` skill before touching templates or CSS.
+1. **Render on the server.** Go templates produce every screen. The browser runs as little as possible. See the `switcharoo-browser-code` skill before adding any script.
+2. **One job per screen, and less on it.** See the `switcharoo-ui` skill before touching templates or CSS.
 3. **Drive Claude on the server; show purpose-built controls.** Do not show a raw terminal where a button or a sentence will do. The terminal has its own screen for when it is needed.
-4. **Restrict what can be run, not who can reach it.** There is no sign-in, by the owner's choice. Superdeck is meant to be reachable only on a private network. It runs a short fixed list of commands with arguments it builds itself. Do not add authentication unless asked. Do add validation. Be honest in the docs about the limit of this: whoever can reach the page can sign in their own Claude account and drive Claude on the Mac.
-5. **Use Anthropic's binary as it is.** Never pass `--dangerously-skip-permissions` or a permission-mode override, never edit Claude's config to pre-trust a folder, never read, copy or store Claude credentials. The one thing Superdeck writes into an account's config directory is its own skill, in its own folder; it does not touch settings, hooks or MCP servers there. Sign-in happens on Anthropic's page.
+4. **Restrict what can be run, not who can reach it.** There is no sign-in, by the owner's choice. Switcharoo is meant to be reachable only on a private network. It runs a short fixed list of commands with arguments it builds itself. Do not add authentication unless asked. Do add validation. Be honest in the docs about the limit of this: whoever can reach the page can sign in their own Claude account and drive Claude on the Mac.
+5. **Use Anthropic's binary as it is.** Never pass `--dangerously-skip-permissions` or a permission-mode override, never edit Claude's config to pre-trust a folder, never read, copy or store Claude credentials. The one thing Switcharoo writes into an account's config directory is its own skill, in its own folder; it does not touch settings, hooks or MCP servers there. Sign-in happens on Anthropic's page.
 6. **Survive failure.** Anything that can crash should be supervised or contained. See "What happens when things go wrong" in the README and keep it true.
 7. **Few dependencies, well-known ones.** Prefer the standard library, then a battle-tested package.
 
@@ -29,9 +29,9 @@ These came from the person who owns this project. Treat them as requirements.
 | `server.go` | `main`, flags, the request guard, account status |
 | `web.go` | routes, page handlers, view models |
 | `instances.go` | accounts, launching, restart rules, sign-in, the allowed keys |
-| `hold.go` | the holder: a detached copy of this binary that keeps one Claude process alive, and `superdeck attach` |
-| `proc.go` | Superdeck's side of a held process: polling it, emulating its terminal, prompt detection |
-| `control.go` | how a Claude session (or a terminal) drives Superdeck: the local socket, the `superdeck COMMAND` set, handoff notes, installing the skill |
+| `hold.go` | the holder: a detached copy of this binary that keeps one Claude process alive, and `switcharoo attach` |
+| `proc.go` | Switcharoo's side of a held process: polling it, emulating its terminal, prompt detection |
+| `control.go` | how a Claude session (or a terminal) drives Switcharoo: the local socket, the `switcharoo COMMAND` set, handoff notes, installing the skill |
 | `skill/SKILL.md` | the skill given to every instance, compiled into the binary. This is a prompt: edit it with the care you would give code |
 | `paths.go` | allowed folders, folder listing, path confinement |
 | `store.go` | the SQLite store and migration runner |
@@ -47,22 +47,23 @@ go test -race ./...
 ```
 
 ```bash
-go build -o superdeck . && ./superdeck ~/Projects
+go build -o switcharoo . && ./switcharoo ~/Projects
 ```
 
 - A new thing the page can do should usually get a command in `control.go` and a paragraph in `skill/SKILL.md` too, going through the same function as the page's handler so the checks cannot differ. Removing an account is left out on purpose.
-- Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `superdeck_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
-- `chaos_test.go` puts two instances through forty random failures (Claude killed, holder killed or frozen, socket deleted, Superdeck replaced) and checks each is running exactly once afterwards. Run it several times after touching `hold.go`, `proc.go` or the restart rules: `go test -race -count=10 -run RandomFailures ./...`. Add a case when you find a new way for things to fail.
+- Tests use a shell-script stand-in for the Claude CLI (`fakeClaude` in `switcharoo_test.go`). Extend it when you learn something new about how the real CLI behaves, and record the fact in the `claude-cli-facts` skill.
+- `chaos_test.go` puts two instances through forty random failures (Claude killed, holder killed or frozen, socket deleted, Switcharoo replaced) and checks each is running exactly once afterwards. Run it several times after touching `hold.go`, `proc.go` or the restart rules: `go test -race -count=10 -run RandomFailures ./...`. Add a case when you find a new way for things to fail.
 - Every screen must render with zero accounts and zero folders. `TestEveryPageRendersEvenWhenEmpty` guards this; add new pages to it.
 - Look at a changed screen in a browser at phone width and desktop width before calling it done. Anything you tap gets tried in iOS Safari (the simulator will do): touch behaves differently from a narrow desktop window.
-- Restarting Superdeck does not touch instances: their holders keep them alive. Killing a holder (`superdeck hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.
+- Restarting Switcharoo does not touch instances: their holders keep them alive. Killing a holder (`switcharoo hold ...` in the process list) does end its Claude, so never kill those on a copy someone is using.
 - **Never run crash tests against someone's real instances.** Build a separate copy with its own `-state`, port and the stand-in CLI. A real session was lost this way once.
-- Never trust a folder on the owner's behalf, in code or while testing against real Claude. Stop at the prompt. The one question Superdeck answers itself is Claude's once-per-account "Enable Remote Control?" (`turnOnRemoteControl`): the owner asked for that, because launching here is asking for Remote Control. Do not add another.
+- Never trust a folder on the owner's behalf, in code or while testing against real Claude. Stop at the prompt. The one question Switcharoo answers itself is Claude's once-per-account "Enable Remote Control?" (`turnOnRemoteControl`): the owner asked for that, because launching here is asking for Remote Control. Do not add another.
 - Do not put real email addresses, host names or home-directory paths in the repository. Use the stand-in for screenshots.
+- **It was called Superdeck until November 2026, and installs from then are still running.** Their state is in `~/.superdeck` with a database called `superdeck.db`, their instances know `$SUPERDECK*`, and their holders' sockets are in directories named `superdeck-...`. `defaultState`, `dataPath`, the environment fallback in `controlMain` and the names in `runDir` keep all of that working. Do not "finish" the rename by changing them: an account's directory can never move, and a holder is found by its socket's path.
 
 ## Skills
 
-- `superdeck-ui`: how screens should look and be organised.
-- `superdeck-browser-code`: the rules for anything that runs in the browser.
-- `superdeck-go`: Go conventions, process supervision, and testing.
+- `switcharoo-ui`: how screens should look and be organised.
+- `switcharoo-browser-code`: the rules for anything that runs in the browser.
+- `switcharoo-go`: Go conventions, process supervision, and testing.
 - `claude-cli-facts`: what has been observed about the Claude CLI's behaviour.

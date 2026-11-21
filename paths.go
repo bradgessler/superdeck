@@ -28,7 +28,7 @@ func within(root, p string) bool {
 }
 
 // expandRoots turns the folders and glob patterns given on the command line
-// into the list of real directories Superdeck may launch Claude in. Nothing
+// into the list of real directories Switcharoo may launch Claude in. Nothing
 // outside these is ever reachable.
 func expandRoots(args []string) ([]string, error) {
 	var out []string
@@ -70,7 +70,7 @@ func expandRoots(args []string) ([]string, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("name at least one folder to allow, for example: superdeck ~/Projects")
+		return nil, errors.New("name at least one folder to allow, for example: switcharoo ~/Projects")
 	}
 	sort.Strings(out)
 	return out, nil
@@ -91,7 +91,7 @@ func resolveProject(roots []string, path string) (string, error) {
 		ok = ok || p == root || within(root, p)
 	}
 	if !ok {
-		return "", errors.New("that folder is outside the folders Superdeck was started with")
+		return "", errors.New("that folder is outside the folders Switcharoo was started with")
 	}
 	if st, err := os.Stat(p); err != nil || !st.IsDir() {
 		return "", errors.New("that is not a folder")
@@ -189,7 +189,7 @@ func createProject(root, name string) (string, error) {
 	// Claude starts each session in a Git worktree, and a repository with no
 	// commit has nothing to base one on: every session would fail to start.
 	// So the folder begins with an empty commit, made as the owner if Git
-	// knows who that is and as Superdeck if not.
+	// knows who that is and as Switcharoo if not.
 	if err := firstCommit(dir); err != nil {
 		os.RemoveAll(dir)
 		return "", err
@@ -199,7 +199,7 @@ func createProject(root, name string) (string, error) {
 
 func firstCommit(dir string) error {
 	var why string
-	for _, who := range [][]string{nil, {"-c", "user.name=Superdeck", "-c", "user.email=superdeck@localhost"}} {
+	for _, who := range [][]string{nil, {"-c", "user.name=Switcharoo", "-c", "user.email=switcharoo@localhost"}} {
 		args := append(append([]string{}, who...), "commit", "--allow-empty", "--no-verify", "-q", "-m", "Start")
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir

@@ -1,9 +1,9 @@
 ---
-name: superdeck-browser-code
-description: Rules for anything that runs in the browser in Superdeck. Read before adding a script tag, a JavaScript file, an hx- attribute or a front-end dependency.
+name: switcharoo-browser-code
+description: Rules for anything that runs in the browser in Switcharoo. Read before adding a script tag, a JavaScript file, an hx- attribute or a front-end dependency.
 ---
 
-# Browser code in Superdeck
+# Browser code in Switcharoo
 
 The owner wants the least possible running in the browser. A previous version was a JavaScript single-page application talking to a JSON API. It broke in front of them (a null-state crash, hash routes) and was thrown away. Browser code is treated as a failure surface to keep small.
 

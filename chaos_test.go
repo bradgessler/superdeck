@@ -14,7 +14,7 @@ import (
 
 // Two instances are put through a long run of the things that go wrong, in
 // random order and on top of one another: Claude dies, a holder dies, a
-// holder freezes, a socket is deleted, Superdeck itself is replaced. After
+// holder freezes, a socket is deleted, Switcharoo itself is replaced. After
 // each, the same must be true: every instance a person launched is running
 // exactly once, and nothing else is.
 func TestInstancesSurviveARunOfRandomFailures(t *testing.T) {
@@ -83,7 +83,7 @@ func TestInstancesSurviveARunOfRandomFailures(t *testing.T) {
 		for _, v := range servers(cur) {
 			t.Logf("  %s %s done=%v lost=%v pid=%d", v.ID, v.Project, v.Done, v.Lost, v.Run.Pid())
 		}
-		t.Fatalf("after %s: %d running in Superdeck, %d in the process table, want %d of each", why, len(live()), claudes(), len(folders))
+		t.Fatalf("after %s: %d running in Switcharoo, %d in the process table, want %d of each", why, len(live()), claudes(), len(folders))
 	}
 	replace := func() {
 		cur.closing.Store(true)
@@ -119,10 +119,10 @@ func TestInstancesSurviveARunOfRandomFailures(t *testing.T) {
 			what = "holder killed"
 			syscall.Kill(hpid, syscall.SIGKILL)
 		case 2:
-			what = "Superdeck replaced"
+			what = "Switcharoo replaced"
 			replace()
 		case 3:
-			what = "socket deleted, then Superdeck replaced"
+			what = "socket deleted, then Switcharoo replaced"
 			os.Remove(r.sock())
 			replace()
 		case 4:
@@ -131,11 +131,11 @@ func TestInstancesSurviveARunOfRandomFailures(t *testing.T) {
 			time.Sleep(300 * time.Millisecond)
 			syscall.Kill(hpid, syscall.SIGCONT)
 		case 5:
-			what = "Claude killed as Superdeck is replaced"
+			what = "Claude killed as Switcharoo is replaced"
 			syscall.Kill(pid, syscall.SIGKILL)
 			replace()
 		case 6:
-			what = "holder killed as Superdeck is replaced"
+			what = "holder killed as Switcharoo is replaced"
 			syscall.Kill(hpid, syscall.SIGKILL)
 			replace()
 		}
@@ -168,7 +168,7 @@ func TestPageAnswersAtWhateverAddressTheMacHas(t *testing.T) {
 	}
 }
 
-func TestWatchdogRestartsAStuckSuperdeckAndLeavesAHealthyOneAlone(t *testing.T) {
+func TestWatchdogRestartsAStuckSwitcharooAndLeavesAHealthyOneAlone(t *testing.T) {
 	watchdogEvery, watchdogTimeout, watchdogFails = 10*time.Millisecond, 100*time.Millisecond, 3
 	exits := make(chan struct{}, 8)
 	watchdogExit = func() { exits <- struct{}{} }
@@ -184,7 +184,7 @@ func TestWatchdogRestartsAStuckSuperdeckAndLeavesAHealthyOneAlone(t *testing.T) 
 	go a.watchdog(addr)
 	select {
 	case <-exits:
-		t.Fatal("a healthy Superdeck was restarted")
+		t.Fatal("a healthy Switcharoo was restarted")
 	case <-time.After(400 * time.Millisecond):
 	}
 	a.closing.Store(true)
@@ -200,6 +200,6 @@ func TestWatchdogRestartsAStuckSuperdeckAndLeavesAHealthyOneAlone(t *testing.T) 
 	select {
 	case <-exits:
 	case <-time.After(5 * time.Second):
-		t.Fatal("a Superdeck that had stopped answering was left running")
+		t.Fatal("a Switcharoo that had stopped answering was left running")
 	}
 }

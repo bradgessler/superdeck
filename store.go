@@ -20,12 +20,12 @@ import (
 
 // Schema changes live in migrations/ as numbered SQL files and are compiled
 // into the binary. Opening the store applies any that have not run yet, so
-// installing a new Superdeck and starting it is the whole upgrade.
+// installing a new Switcharoo and starting it is the whole upgrade.
 //
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// Store is Superdeck's own data: accounts and the instances to bring back.
+// Store is Switcharoo's own data: accounts and the instances to bring back.
 // Claude's data stays in each account's config directory.
 type Store struct{ db *sql.DB }
 
@@ -74,7 +74,7 @@ func migrate(db *sql.DB, path string, existed bool) error {
 		}
 	}
 	if current > latest {
-		return fmt.Errorf("%s was written by a newer Superdeck (schema %d); this one understands up to %d. Install the newer version", path, current, latest)
+		return fmt.Errorf("%s was written by a newer Switcharoo (schema %d); this one understands up to %d. Install the newer version", path, current, latest)
 	}
 	if current == latest {
 		return nil
@@ -149,7 +149,7 @@ func nameError(err error) error {
 	return err
 }
 
-// Wanted lists the instances to bring back when Superdeck starts.
+// Wanted lists the instances to bring back when Switcharoo starts.
 func (s *Store) Wanted() ([]wanted, error) {
 	rows, err := s.db.Query(`SELECT account_id, folder, spawn, capacity FROM instances ORDER BY folder, account_id`)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *Store) EndRun(id string, code int) error {
 	return err
 }
 
-// LiveRuns returns the processes that had not exited when Superdeck last knew.
+// LiveRuns returns the processes that had not exited when Switcharoo last knew.
 func (s *Store) LiveRuns() ([]*Run, error) {
 	rows, err := s.db.Query(`SELECT id, kind, account_id, folder, dir, name, spawn, capacity, version, restarts, started_at, stopped, hpid, pid
 		FROM runs WHERE ended_at IS NULL ORDER BY started_at`)
